@@ -28,15 +28,24 @@ pub enum Commands {
         #[arg(long = "for", value_enum, conflicts_with = "size")]
         preset: Option<Platform>,
 
-        /// Optional output file path
+        /// output file path
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Mute a video
+    Mute {
+        /// Input video file
+        input: PathBuf,
+
+        /// output file path
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
 pub enum Platform {
     Discord,
     Whatsapp,
-    Twitter,
 }

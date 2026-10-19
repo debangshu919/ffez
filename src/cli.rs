@@ -45,6 +45,53 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         overwrite: bool,
     },
+
+    /// Extract the audio track from a video file
+    Audio {
+        /// Input video file
+        input: PathBuf,
+
+        /// Audio format to extract into (inferred from --output if omitted, otherwise defaults to mp3)
+        #[arg(short, long, value_enum)]
+        format: Option<AudioFormat>,
+
+        /// Optional output file path (defaults to <input>.<format>)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Overwrite output file if it already exists
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioFormat {
+    Mp3,
+    Wav,
+    M4a,
+    Flac,
+}
+
+impl AudioFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            AudioFormat::Mp3 => "mp3",
+            AudioFormat::Wav => "wav",
+            AudioFormat::M4a => "m4a",
+            AudioFormat::Flac => "flac",
+        }
+    }
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "mp3" => Some(AudioFormat::Mp3),
+            "wav" => Some(AudioFormat::Wav),
+            "m4a" | "aac" => Some(AudioFormat::M4a),
+            "flac" => Some(AudioFormat::Flac),
+            _ => None,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

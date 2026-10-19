@@ -3,7 +3,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum FfezError {
-    #[error("FFmpeg not found in PATH. Install it via `winget install Gyan.FFmpeg`, `brew install ffmpeg`, or your package manager.")]
+    #[error(
+        "FFmpeg not found in PATH. Install it via `winget install Gyan.FFmpeg`, `brew install ffmpeg`, or your package manager."
+    )]
     MissingFfmpeg,
 
     #[error("Input file not found: '{0}'")]

@@ -23,3 +23,13 @@ which = "8.0.6"
 
 [dev-dependencies]
 assert_cmd = "2"
+
+[profile.dev]
+opt-level = 0
+incremental = true
+
+[profile.release]
+opt-level = 3
+strip = "symbols"
+lto = true
+debug = false

@@ -22,6 +22,9 @@ pub enum FfezError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Output path cannot be the same as input path: '{0}'")]
+    InputOutputSame(PathBuf),
 }
 
 impl FfezError {

@@ -8,7 +8,6 @@ pub struct ExecutionPlan {
     pub input: PathBuf,
     pub final_output: PathBuf,
     pub overwrite: bool,
-    /// Arguments excluding the final output path (injected by the runner for temp-file safety)
     pub ffmpeg_args: Vec<OsString>,
 }
 
@@ -17,10 +16,19 @@ pub fn plan_mute(
     output: Option<&Path>,
     overwrite: bool,
 ) -> Result<ExecutionPlan, FfezError> {
+    let input_ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4");
+
     let final_output = match output {
-        Some(out) => out.to_path_buf(),
-        None => derive_default_output(input, "muted")?,
+        Some(out) => ensure_extension(out, input_ext),
+        None => derive_suffixed_output(input, "muted", input_ext)?,
     };
+
+    if final_output == input {
+        return Err(FfezError::InputOutputSame(final_output));
+    }
 
     let ffmpeg_args = vec![
         OsString::from("-hide_banner"),
@@ -59,11 +67,15 @@ pub fn plan_audio(
         })
         .unwrap_or(AudioFormat::Mp3);
 
-    // 2. Resolve output path
+    // 2. Resolve output path and guarantee it has an extension
     let final_output = match output {
-        Some(out) => out.to_path_buf(),
+        Some(out) => ensure_extension(out, resolved_format.extension()),
         None => derive_audio_output(input, resolved_format.extension())?,
     };
+
+    if final_output == input {
+        return Err(FfezError::InputOutputSame(final_output));
+    }
 
     // 3. Build format-specific codec flags
     let mut ffmpeg_args = vec![
@@ -72,7 +84,7 @@ pub fn plan_audio(
         OsString::from("error"),
         OsString::from("-i"),
         input.as_os_str().to_os_string(),
-        OsString::from("-vn"), // Strip video track
+        OsString::from("-vn"),
     ];
 
     match resolved_format {
@@ -85,7 +97,10 @@ pub fn plan_audio(
             ]);
         }
         AudioFormat::Wav => {
-            ffmpeg_args.extend([OsString::from("-c:a"), OsString::from("pcm_s16le")]);
+            ffmpeg_args.extend([
+                OsString::from("-c:a"),
+                OsString::from("pcm_s16le"),
+            ]);
         }
         AudioFormat::M4a => {
             ffmpeg_args.extend([
@@ -98,7 +113,10 @@ pub fn plan_audio(
             ]);
         }
         AudioFormat::Flac => {
-            ffmpeg_args.extend([OsString::from("-c:a"), OsString::from("flac")]);
+            ffmpeg_args.extend([
+                OsString::from("-c:a"),
+                OsString::from("flac"),
+            ]);
         }
     }
 
@@ -110,20 +128,26 @@ pub fn plan_audio(
     })
 }
 
+/// Appends `default_ext` if `path` has no file extension
+fn ensure_extension(path: &Path, default_ext: &str) -> PathBuf {
+    match path.extension() {
+        Some(ext) if !ext.is_empty() => path.to_path_buf(),
+        _ => path.with_extension(default_ext),
+    }
+}
+
 /// Converts `path/to/video.mp4` -> `path/to/video_muted.mp4`
-fn derive_default_output(input: &Path, suffix: &str) -> Result<PathBuf, FfezError> {
+fn derive_suffixed_output(input: &Path, suffix: &str, ext: &str) -> Result<PathBuf, FfezError> {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| FfezError::InvalidPath(input.to_path_buf()))?;
 
-    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
     let parent = input.parent().unwrap_or_else(|| Path::new(""));
-
     Ok(parent.join(format!("{stem}_{suffix}.{ext}")))
 }
 
-/// Converts `path/to/video.mp4` -> `path/to/video.mp3` (or `video_audio.mp3` if input is already `.mp3`)
+/// Converts `path/to/video.mp4` -> `path/to/video.mp3`
 fn derive_audio_output(input: &Path, target_ext: &str) -> Result<PathBuf, FfezError> {
     let stem = input
         .file_stem()
@@ -194,5 +218,37 @@ mod tests {
         let plan = plan_audio(input, None, Some(AudioFormat::Mp3), false).unwrap();
 
         assert_eq!(plan.final_output, PathBuf::from("already_audio_audio.mp3"));
+    }
+
+    #[test]
+    fn test_mute_appends_input_extension_when_output_has_none() {
+        let input = Path::new("clips/gameplay.mkv");
+        let custom_out = Path::new("clips/silent_version");
+        let plan = plan_mute(input, Some(custom_out), false).unwrap();
+
+        assert_eq!(plan.final_output, PathBuf::from("clips/silent_version.mkv"));
+    }
+
+    #[test]
+    fn test_audio_appends_format_extension_when_output_has_none() {
+        let input = Path::new("interview.mp4");
+        let custom_out = Path::new("podcast_episode");
+
+        // With explicit --format wav and extensionless -o
+        let plan = plan_audio(input, Some(custom_out), Some(AudioFormat::Wav), false).unwrap();
+        assert_eq!(plan.final_output, PathBuf::from("podcast_episode.wav"));
+
+        // With default format (mp3) and extensionless -o
+        let plan_default = plan_audio(input, Some(custom_out), None, false).unwrap();
+        assert_eq!(plan_default.final_output, PathBuf::from("podcast_episode.mp3"));
+    }
+
+    #[test]
+    fn test_rejects_output_identical_to_input() {
+        let input = Path::new("video.mp4");
+        // Even if user passes `-o video` without extension, `ensure_extension` resolves it
+        // to `video.mp4` and catches the self-overwrite!
+        let err = plan_mute(input, Some(Path::new("video")), true).unwrap_err();
+        assert!(matches!(err, FfezError::InputOutputSame(_)));
     }
 }

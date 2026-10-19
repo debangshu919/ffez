@@ -1,7 +1,18 @@
 [package]
 name = "ffez"
 version = "0.1.0"
+authors = ["Debangshu Das <personal.debangshu444@gmail.com>"]
 edition = "2024"
+description = "A ffmpeg wrapper built for your everyday tasks"
+repository = "https://github.com/debangshu919/ffez"
+license = "MIT"
+keywords = [
+    "ffmpeg",
+    "video",
+    "audio",
+    "tool"
+]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

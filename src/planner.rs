@@ -16,10 +16,7 @@ pub fn plan_mute(
     output: Option<&Path>,
     overwrite: bool,
 ) -> Result<ExecutionPlan, FfezError> {
-    let input_ext = input
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4");
+    let input_ext = input.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
 
     let final_output = match output {
         Some(out) => ensure_extension(out, input_ext),
@@ -97,10 +94,7 @@ pub fn plan_audio(
             ]);
         }
         AudioFormat::Wav => {
-            ffmpeg_args.extend([
-                OsString::from("-c:a"),
-                OsString::from("pcm_s16le"),
-            ]);
+            ffmpeg_args.extend([OsString::from("-c:a"), OsString::from("pcm_s16le")]);
         }
         AudioFormat::M4a => {
             ffmpeg_args.extend([
@@ -113,10 +107,7 @@ pub fn plan_audio(
             ]);
         }
         AudioFormat::Flac => {
-            ffmpeg_args.extend([
-                OsString::from("-c:a"),
-                OsString::from("flac"),
-            ]);
+            ffmpeg_args.extend([OsString::from("-c:a"), OsString::from("flac")]);
         }
     }
 
@@ -240,7 +231,10 @@ mod tests {
 
         // With default format (mp3) and extensionless -o
         let plan_default = plan_audio(input, Some(custom_out), None, false).unwrap();
-        assert_eq!(plan_default.final_output, PathBuf::from("podcast_episode.mp3"));
+        assert_eq!(
+            plan_default.final_output,
+            PathBuf::from("podcast_episode.mp3")
+        );
     }
 
     #[test]

@@ -1,8 +1,14 @@
-# ffez
+<h1 align="center">ffez</h1>
+<h3 align="center"><b>A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.</b></h3>
 
-A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.
+<p align="center">No need to memorize complex FFmpeg flags. <b>ffez</b> handles the syntax, ensures safe atomic file writes, and lets you preview underlying commands before running them.</p>
 
-No need to memorize complex FFmpeg flags. `ffez` handles the syntax, ensures safe atomic file writes, and lets you preview underlying commands before running them.
+<p align="center">
+  <a href="#prerequisites">Prerequisites</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#usage">How to Use</a> •
+  <a href="#command-reference">Command Reference</a>
+</p>
 
 ---
 
@@ -12,7 +18,7 @@ No need to memorize complex FFmpeg flags. `ffez` handles the syntax, ensures saf
 - [FFmpeg](https://ffmpeg.org/download.html) must be installed and available in your system `PATH`.
 
 ---
-    
+
 ## Installation
 
 Install using Cargo

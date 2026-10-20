@@ -10,6 +10,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: MSRV Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Extract MSRV from Cargo.toml
+        id: msrv
+        run: |
+          MSRV=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].rust_version')
+          if [ -z "$MSRV" ] || [ "$MSRV" = "null" ]; then
+            echo "Error: rust-version not specified in Cargo.toml"
+            exit 1
+          fi
+          echo "Discovered MSRV: $MSRV"
+          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.msrv }}
+
+      - name: Install cargo-msrv
+        uses: taiki-e/install-action@cargo-msrv
+
+      - name: Verify MSRV with cargo-msrv
+        run: cargo msrv verify
+
+      - name: Build on MSRV
+        run: cargo build --verbose
+
+      - name: Run Tests on MSRV
+        run: cargo test --verbose
+
   build_and_test:
     name: Rust (${{ matrix.toolchain }})
     runs-on: ubuntu-latest

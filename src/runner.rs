@@ -153,4 +153,90 @@ mod tests {
             .collect();
         assert_eq!(remaining_files, vec!["corrupt.mp4"]);
     }
+
+    #[test]
+    fn test_format_dry_run_without_spaces() {
+        let input = Path::new("clip.mp4");
+        let plan = plan_mute(input, None, false).unwrap();
+        let cmd = format_dry_run(&plan);
+
+        assert_eq!(
+            cmd,
+            "ffmpeg -y -hide_banner -loglevel error -i clip.mp4 -c:v copy -an -movflags +faststart clip_muted.mp4"
+        );
+    }
+
+    #[test]
+    fn test_format_dry_run_audio_plan() {
+        use crate::planner::plan_audio;
+        let input = Path::new("interview.mp4");
+        let plan = plan_audio(input, None, None, false).unwrap();
+        let cmd = format_dry_run(&plan);
+
+        assert!(cmd.contains("-vn"));
+        assert!(cmd.contains("-c:a libmp3lame"));
+        assert!(cmd.contains("-b:a 192k"));
+        assert!(cmd.ends_with("interview.mp3"));
+    }
+
+    #[test]
+    fn test_execute_allows_overwrite_when_flag_is_true() {
+        if check_ffmpeg().is_err() {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("video.mp4");
+        let output = dir.path().join("video_muted.mp4");
+
+        // Create dummy files for both input and output
+        File::create(&input).unwrap();
+        File::create(&output).unwrap();
+
+        let plan = plan_mute(&input, Some(&output), true).unwrap();
+        let err = execute(&plan).unwrap_err();
+
+        // Should NOT fail with OutputExists because overwrite is true.
+        // It fails with FfmpegFailed because the dummy file has invalid video content.
+        assert!(
+            matches!(err, FfezError::FfmpegFailed { .. }),
+            "Expected FfmpegFailed but got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_execute_audio_cleans_up_temp_file_on_corrupt_input() {
+        if check_ffmpeg().is_err() {
+            return;
+        }
+
+        use crate::planner::plan_audio;
+        let dir = tempdir().unwrap();
+        let corrupt_input = dir.path().join("corrupt_video.mp4");
+        let output = dir.path().join("extracted_audio.mp3");
+
+        fs::write(&corrupt_input, b"not valid video or audio").unwrap();
+
+        let plan = plan_audio(&corrupt_input, Some(&output), None, false).unwrap();
+        let err = execute(&plan).unwrap_err();
+
+        assert!(matches!(err, FfezError::FfmpegFailed { .. }));
+        assert!(!output.exists());
+        let remaining_files: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(remaining_files, vec!["corrupt_video.mp4"]);
+    }
+
+    #[test]
+    fn test_check_ffmpeg_reflects_environment() {
+        let has_ffmpeg = which::which("ffmpeg").is_ok();
+        let res = check_ffmpeg();
+        if has_ffmpeg {
+            assert!(res.is_ok());
+        } else {
+            assert!(matches!(res.unwrap_err(), FfezError::MissingFfmpeg));
+        }
+    }
 }

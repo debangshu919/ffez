@@ -3,7 +3,7 @@ name = "ffez"
 version = "0.1.0"
 authors = ["Debangshu Das <personal.debangshu444@gmail.com>"]
 edition = "2024"
-description = "A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks."
+description = "A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.  "
 repository = "https://github.com/debangshu919/ffez"
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -13,6 +13,10 @@ keywords = [
     "tool"
 ]
 categories = ["command-line-utilities"]
+
+[[bin]]
+name = "ffez"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

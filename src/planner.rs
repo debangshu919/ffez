@@ -245,4 +245,153 @@ mod tests {
         let err = plan_mute(input, Some(Path::new("video")), true).unwrap_err();
         assert!(matches!(err, FfezError::InputOutputSame(_)));
     }
+
+    #[test]
+    fn test_audio_rejects_output_identical_to_input() {
+        let input = Path::new("song.mp3");
+        let err = plan_audio(input, Some(Path::new("song.mp3")), None, false).unwrap_err();
+        assert!(matches!(err, FfezError::InputOutputSame(_)));
+
+        // Also caught when user omits extension in output
+        let err2 = plan_audio(input, Some(Path::new("song")), None, false).unwrap_err();
+        assert!(matches!(err2, FfezError::InputOutputSame(_)));
+    }
+
+    #[test]
+    fn test_mute_with_extensionless_input() {
+        let input = Path::new("myvideo");
+        let plan = plan_mute(input, None, false).unwrap();
+        assert_eq!(plan.final_output, PathBuf::from("myvideo_muted.mp4"));
+    }
+
+    #[test]
+    fn test_mute_with_nested_directories_and_spaces() {
+        let input = Path::new("clips/vacation 2026/beach sunset.mkv");
+        let plan = plan_mute(input, None, true).unwrap();
+        assert_eq!(
+            plan.final_output,
+            PathBuf::from("clips/vacation 2026/beach sunset_muted.mkv")
+        );
+        assert!(plan.overwrite);
+    }
+
+    #[test]
+    fn test_mute_with_unicode_characters() {
+        let input = Path::new("vidéo_été_2026.mp4");
+        let plan = plan_mute(input, None, false).unwrap();
+        assert_eq!(plan.final_output, PathBuf::from("vidéo_été_2026_muted.mp4"));
+    }
+
+    #[test]
+    fn test_mute_with_multiple_dots_in_filename() {
+        let input = Path::new("backup.archive.v1.mp4");
+        let plan = plan_mute(input, None, false).unwrap();
+        assert_eq!(
+            plan.final_output,
+            PathBuf::from("backup.archive.v1_muted.mp4")
+        );
+    }
+
+    #[test]
+    fn test_mute_ffmpeg_args_structure() {
+        let input = Path::new("input.mov");
+        let plan = plan_mute(input, None, false).unwrap();
+
+        let expected_args: Vec<OsString> = vec![
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-i".into(),
+            "input.mov".into(),
+            "-c:v".into(),
+            "copy".into(),
+            "-an".into(),
+            "-movflags".into(),
+            "+faststart".into(),
+        ];
+        assert_eq!(plan.ffmpeg_args, expected_args);
+    }
+
+    #[test]
+    fn test_audio_all_codec_flags() {
+        let input = Path::new("input.mp4");
+
+        // MP3
+        let plan_mp3 = plan_audio(input, None, Some(AudioFormat::Mp3), false).unwrap();
+        assert!(
+            plan_mp3
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-c:a" && w[1] == "libmp3lame")
+        );
+        assert!(
+            plan_mp3
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-b:a" && w[1] == "192k")
+        );
+
+        // WAV
+        let plan_wav = plan_audio(input, None, Some(AudioFormat::Wav), false).unwrap();
+        assert!(
+            plan_wav
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-c:a" && w[1] == "pcm_s16le")
+        );
+
+        // M4A
+        let plan_m4a = plan_audio(input, None, Some(AudioFormat::M4a), false).unwrap();
+        assert!(
+            plan_m4a
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-c:a" && w[1] == "aac")
+        );
+        assert!(
+            plan_m4a
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-b:a" && w[1] == "192k")
+        );
+        assert!(
+            plan_m4a
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-movflags" && w[1] == "+faststart")
+        );
+
+        // FLAC
+        let plan_flac = plan_audio(input, None, Some(AudioFormat::Flac), false).unwrap();
+        assert!(
+            plan_flac
+                .ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-c:a" && w[1] == "flac")
+        );
+    }
+
+    #[test]
+    fn test_audio_format_precedence_over_output_extension() {
+        let input = Path::new("input.mp4");
+        // User provides -o track.wav, but explicitly requests -f flac
+        let custom_out = Path::new("track.wav");
+        let plan = plan_audio(input, Some(custom_out), Some(AudioFormat::Flac), false).unwrap();
+
+        // Target codec is FLAC because format flag takes precedence
+        assert!(
+            plan.ffmpeg_args
+                .windows(2)
+                .any(|w| w[0] == "-c:a" && w[1] == "flac")
+        );
+        // Existing extension is preserved on output path
+        assert_eq!(plan.final_output, PathBuf::from("track.wav"));
+    }
+
+    #[test]
+    fn test_audio_with_extensionless_input() {
+        let input = Path::new("myvideo");
+        let plan = plan_audio(input, None, None, false).unwrap();
+        assert_eq!(plan.final_output, PathBuf::from("myvideo.mp3"));
+    }
 }

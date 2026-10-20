@@ -1,7 +1,12 @@
 <h1 align="center">ffez</h1>
 <h3 align="center"><b>A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.</b></h3>
 
-<p align="center">No need to memorize complex FFmpeg flags. <b>ffez</b> handles the syntax, ensures safe atomic file writes, and lets you preview underlying commands before running them.</p>
+<p align="center">
+  <img alt="Crates.io Version" src="https://img.shields.io/crates/v/ffez?style=for-the-badge">
+  <img alt="Crates.io License (version)" src="https://img.shields.io/crates/l/ffez/0.1.0?style=for-the-badge&cacheSeconds=3600">
+  <br/>
+  No need to memorize complex FFmpeg flags. <b>ffez</b> handles the syntax, ensures safe atomic file writes, and lets you preview underlying commands before running them.
+</p>
 
 <p align="center">
   <a href="#prerequisites">Prerequisites</a> •

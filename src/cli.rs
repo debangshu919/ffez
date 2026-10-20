@@ -3,7 +3,18 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "ffez", version, about = "ffmpeg made easy")]
+#[command(
+    name = "ffez",
+    version,
+    about,
+    long_about = "ffez is a fast, ergonomic FFmpeg CLI wrapper built for everyday media tasks.\n\
+                  It simplifies common audio and video operations into clean, memorable commands\n\
+                  so you don't have to remember complex FFmpeg flags.\n\n\
+                  All operations write to a temporary file before moving to the final destination,\n\
+                  protecting your files from partial or interrupted writes. Use --dry-run to inspect\n\
+                  the exact FFmpeg command before executing it.",
+    author
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -33,6 +44,12 @@ pub enum Commands {
     //     output: Option<PathBuf>,
     // },
     /// Mute a video
+    #[command(
+        about = "Mute a video",
+        long_about = "Removes all audio streams from a video file.\n\n\
+                      Uses stream copy (-c:v copy) to instantly produce lossless video output\n\
+                      without re-encoding."
+    )]
     Mute {
         /// Input video file
         input: PathBuf,
@@ -47,6 +64,13 @@ pub enum Commands {
     },
 
     /// Extract the audio track from a video file
+    #[command(
+        about = "Extract the audio track from a video file",
+        long_about = "Extracts audio from a video file into mp3, wav, m4a, or flac.\n\n\
+                      If --format is omitted, it will be inferred from the output filename's\n\
+                      extension (e.g., -o song.wav). If no extension is found or provided,\n\
+                      it defaults to mp3."
+    )]
     Audio {
         /// Input video file
         input: PathBuf,

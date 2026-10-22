@@ -1,0 +1,312 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v0.1.0). If empty, version in Cargo.toml is used.'
+        required: false
+        type: string
+        default: ''
+      draft:
+        description: 'Create release as a draft'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark release as pre-release'
+        required: false
+        type: boolean
+        default: false
+      skip_tests:
+        description: 'Skip running tests prior to release'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Quality Gate (Lint & Test)
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Clippy Linter
+        run: cargo clippy -- -D warnings
+
+      - name: Run Tests
+        run: cargo test --verbose
+
+  create-release:
+    name: Prepare Release
+    needs: test
+    if: |
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      is_draft: ${{ steps.tag.outputs.is_draft }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release tag
+        id: tag
+        env:
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+        run: |
+          if [ -n "$INPUT_TAG_NAME" ]; then
+            TAG=$(echo "$INPUT_TAG_NAME" | tr -d '[:space:]')
+          else
+            VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/' | tr -d '[:space:]')
+            TAG="v$VERSION"
+          fi
+
+          # Ensure tag starts with 'v'
+          if [[ ! "$TAG" =~ ^v ]]; then
+            TAG="v$TAG"
+          fi
+
+          CLEAN_VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$CLEAN_VER" >> "$GITHUB_OUTPUT"
+          echo "is_draft=${INPUT_DRAFT:-false}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG (version: $CLEAN_VER)"
+
+      - name: Ensure Git tag exists
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG does not exist on remote origin. Creating and pushing tag..."
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          else
+            echo "Tag $TAG already exists on remote origin."
+          fi
+
+      - name: Initialize draft GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          TARGET_SHA: ${{ github.sha }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || echo "false")
+            if [ "$IS_DRAFT" = "false" ]; then
+              echo "::error::Release $TAG already exists and is already published! Cannot overwrite an existing published release."
+              exit 1
+            fi
+            echo "Draft release $TAG already exists on GitHub. Resuming release process."
+          else
+            echo "Creating initial draft release for $TAG..."
+            FLAGS="--draft --target $TARGET_SHA --title $TAG"
+            if [ "$INPUT_PRERELEASE" = "true" ] || [[ "$TAG" =~ - ]]; then
+              FLAGS="$FLAGS --prerelease"
+            fi
+
+            NOTES_FILE=""
+            CLEAN_VER="${TAG#v}"
+            if [ -f CHANGELOG.md ]; then
+              awk -v ver="$TAG" -v cver="$CLEAN_VER" '
+                BEGIN { capture = 0; level = 0 }
+                match($0, /^#+/) {
+                  hdr_len = RLENGTH
+                  rest = substr($0, hdr_len + 1)
+                  if (rest ~ ("^[[:space:]]*\\[?(" ver "|" cver ")(\\]|[[:space:]]|$)")) {
+                    capture = 1
+                    level = hdr_len
+                    next
+                  } else if (capture && hdr_len <= level) {
+                    exit
+                  }
+                }
+                capture { print }
+              ' CHANGELOG.md > changelog_notes.tmp
+
+              if grep -q '[^[:space:]]' changelog_notes.tmp 2>/dev/null; then
+                NOTES_FILE="changelog_notes.tmp"
+              fi
+            fi
+
+            if [ -n "$NOTES_FILE" ]; then
+              gh release create "$TAG" $FLAGS --notes-file "$NOTES_FILE"
+            else
+              gh release create "$TAG" $FLAGS --generate-notes
+            fi
+          fi
+
+  upload-assets:
+    name: Build & Upload (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux GNU
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+
+          # Linux Musl (Fully static standalone binaries)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+
+          # Linux ARMv7 (32-bit Raspberry Pi / IoT)
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+
+          # Apple macOS (Intel, Apple Silicon, and Universal binary)
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+
+          # Microsoft Windows (x86_64 & ARM64)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target != 'universal-apple-darwin' && matrix.target || '' }}
+
+      - name: Build and upload binary
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: ffez
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          tar: unix
+          zip: windows
+          checksum: sha256
+          include: LICENSE-MIT,LICENSE-APACHE,README.md,CHANGELOG.md
+          ref: refs/tags/${{ needs.create-release.outputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    name: Finalize & Publish Release
+    needs: [create-release, upload-assets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+
+      - name: Generate Consolidated SHA256SUMS and Step Summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          IS_DRAFT: ${{ needs.create-release.outputs.is_draft }}
+        run: |
+          mkdir -p release-assets
+          cd release-assets
+
+          # Download all assets from the release into current directory
+          gh release download "$TAG" --dir .
+
+          # Find all archive assets (.tar.gz and .zip) safely using nullglob
+          shopt -s nullglob
+          archives=(*.tar.gz *.zip)
+
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No archive assets found in release $TAG!"
+            exit 1
+          fi
+
+          # Generate combined checksum file
+          sha256sum "${archives[@]}" > SHA256SUMS.txt
+
+          # Upload SHA256SUMS.txt to the release
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+
+          # Build GitHub Step Summary
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "## Release $TAG Draft Prepared Successfully!" >> "$GITHUB_STEP_SUMMARY"
+            echo "The release draft has been created with all cross-compiled assets and checksums." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Release $TAG Published Successfully!" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Release Assets & Checksums" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Asset Name | SHA256 Hash | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+
+          for file in "${archives[@]}"; do
+            HASH=$(sha256sum "$file" | awk '{print $1}')
+            SIZE=$(ls -lh "$file" | awk '{print $5}')
+            echo "| \`$file\` | \`$HASH\` | $SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          HASH_SUMS=$(sha256sum SHA256SUMS.txt | awk '{print $1}')
+          SIZE_SUMS=$(ls -lh SHA256SUMS.txt | awk '{print $5}')
+          echo "| \`SHA256SUMS.txt\` | \`$HASH_SUMS\` | $SIZE_SUMS |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish draft release
+        if: needs.create-release.outputs.is_draft != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          echo "Publishing release $TAG..."
+          gh release edit "$TAG" --draft=false

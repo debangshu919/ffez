@@ -7,6 +7,7 @@
   <br/>
   <img alt="Crates.io Version" src="https://img.shields.io/crates/v/ffez?style=for-the-badge">
   <a href="https://github.com/debangshu919/ffez/actions/workflows/ci.yml"><img alt="CI Status" src="https://img.shields.io/github/actions/workflow/status/debangshu919/ffez/ci.yml?branch=main&style=for-the-badge"></a>
+  <a href="https://codecov.io/gh/debangshu919/ffez"><img alt="Codecov Coverage" src="https://img.shields.io/codecov/c/github/debangshu919/ffez?style=for-the-badge"></a>
   <img alt="Crates.io License (version)" src="https://img.shields.io/crates/l/ffez/0.1.0?style=for-the-badge&cacheSeconds=3600">
 </div>
 <h3 align="center"><b>A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.</b></h3>

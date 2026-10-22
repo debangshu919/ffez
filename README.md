@@ -1,11 +1,17 @@
-<h1 align="center">ffez</h1>
-<h3 align="center"><b>A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.</b></h3>
-
-<p align="center">
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/debangshu919/ffez/refs/heads/main/assets/images/ffez_light.svg" width="200px">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/debangshu919/ffez/refs/heads/main/assets/images/ffez_dark.svg" width="200px">
+    <img alt="ffez Logo" src="https://raw.githubusercontent.com/debangshu919/ffez/refs/heads/main/assets/images/ffez_light.svg" width="200px">
+  </picture>
+  <br/>
   <img alt="Crates.io Version" src="https://img.shields.io/crates/v/ffez?style=for-the-badge">
   <a href="https://github.com/debangshu919/ffez/actions/workflows/ci.yml"><img alt="CI Status" src="https://img.shields.io/github/actions/workflow/status/debangshu919/ffez/ci.yml?branch=main&style=for-the-badge"></a>
   <img alt="Crates.io License (version)" src="https://img.shields.io/crates/l/ffez/0.1.0?style=for-the-badge&cacheSeconds=3600">
-  <br/>
+</div>
+<h3 align="center"><b>A minimal FFmpeg CLI wrapper built for your everyday audio and video tasks.</b></h3>
+
+<p align="center">
   No need to memorize complex FFmpeg flags. <b>ffez</b> handles the syntax, ensures safe atomic file writes, and lets you preview underlying commands before running them.
 </p>
 

@@ -1,52 +1,9 @@
 use crate::cli::AudioFormat;
 use crate::error::FfezError;
+use crate::planner::ExecutionPlan;
+use crate::planner::utils::ensure_extension;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, PartialEq)]
-pub struct ExecutionPlan {
-    pub input: PathBuf,
-    pub final_output: PathBuf,
-    pub overwrite: bool,
-    pub ffmpeg_args: Vec<OsString>,
-}
-
-pub fn plan_mute(
-    input: &Path,
-    output: Option<&Path>,
-    overwrite: bool,
-) -> Result<ExecutionPlan, FfezError> {
-    let input_ext = input.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
-
-    let final_output = match output {
-        Some(out) => ensure_extension(out, input_ext),
-        None => derive_suffixed_output(input, "muted", input_ext)?,
-    };
-
-    if final_output == input {
-        return Err(FfezError::InputOutputSame(final_output));
-    }
-
-    let ffmpeg_args = vec![
-        OsString::from("-hide_banner"),
-        OsString::from("-loglevel"),
-        OsString::from("error"),
-        OsString::from("-i"),
-        input.as_os_str().to_os_string(),
-        OsString::from("-c:v"),
-        OsString::from("copy"),
-        OsString::from("-an"),
-        OsString::from("-movflags"),
-        OsString::from("+faststart"),
-    ];
-
-    Ok(ExecutionPlan {
-        input: input.to_path_buf(),
-        final_output,
-        overwrite,
-        ffmpeg_args,
-    })
-}
 
 pub fn plan_audio(
     input: &Path,
@@ -119,25 +76,6 @@ pub fn plan_audio(
     })
 }
 
-/// Appends `default_ext` if `path` has no file extension
-fn ensure_extension(path: &Path, default_ext: &str) -> PathBuf {
-    match path.extension() {
-        Some(ext) if !ext.is_empty() => path.to_path_buf(),
-        _ => path.with_extension(default_ext),
-    }
-}
-
-/// Converts `path/to/video.mp4` -> `path/to/video_muted.mp4`
-fn derive_suffixed_output(input: &Path, suffix: &str, ext: &str) -> Result<PathBuf, FfezError> {
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| FfezError::InvalidPath(input.to_path_buf()))?;
-
-    let parent = input.parent().unwrap_or_else(|| Path::new(""));
-    Ok(parent.join(format!("{stem}_{suffix}.{ext}")))
-}
-
 /// Converts `path/to/video.mp4` -> `path/to/video.mp3`
 fn derive_audio_output(input: &Path, target_ext: &str) -> Result<PathBuf, FfezError> {
     let stem = input
@@ -147,7 +85,6 @@ fn derive_audio_output(input: &Path, target_ext: &str) -> Result<PathBuf, FfezEr
 
     let parent = input.parent().unwrap_or_else(|| Path::new(""));
     let candidate = parent.join(format!("{stem}.{target_ext}"));
-
     if candidate == input {
         Ok(parent.join(format!("{stem}_audio.{target_ext}")))
     } else {
@@ -158,21 +95,6 @@ fn derive_audio_output(input: &Path, target_ext: &str) -> Result<PathBuf, FfezEr
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_output_naming() {
-        let input = Path::new("clips/gameplay.mp4");
-        let plan = plan_mute(input, None, false).unwrap();
-        assert_eq!(plan.final_output, PathBuf::from("clips/gameplay_muted.mp4"));
-    }
-
-    #[test]
-    fn test_mute_args_contain_copy_and_an() {
-        let input = Path::new("test.mp4");
-        let plan = plan_mute(input, None, false).unwrap();
-        assert!(plan.ffmpeg_args.contains(&OsString::from("copy")));
-        assert!(plan.ffmpeg_args.contains(&OsString::from("-an")));
-    }
 
     #[test]
     fn test_audio_defaults_to_mp3() {
@@ -212,15 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mute_appends_input_extension_when_output_has_none() {
-        let input = Path::new("clips/gameplay.mkv");
-        let custom_out = Path::new("clips/silent_version");
-        let plan = plan_mute(input, Some(custom_out), false).unwrap();
-
-        assert_eq!(plan.final_output, PathBuf::from("clips/silent_version.mkv"));
-    }
-
-    #[test]
     fn test_audio_appends_format_extension_when_output_has_none() {
         let input = Path::new("interview.mp4");
         let custom_out = Path::new("podcast_episode");
@@ -238,15 +151,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_output_identical_to_input() {
-        let input = Path::new("video.mp4");
-        // Even if user passes `-o video` without extension, `ensure_extension` resolves it
-        // to `video.mp4` and catches the self-overwrite!
-        let err = plan_mute(input, Some(Path::new("video")), true).unwrap_err();
-        assert!(matches!(err, FfezError::InputOutputSame(_)));
-    }
-
-    #[test]
     fn test_audio_rejects_output_identical_to_input() {
         let input = Path::new("song.mp3");
         let err = plan_audio(input, Some(Path::new("song.mp3")), None, false).unwrap_err();
@@ -255,61 +159,6 @@ mod tests {
         // Also caught when user omits extension in output
         let err2 = plan_audio(input, Some(Path::new("song")), None, false).unwrap_err();
         assert!(matches!(err2, FfezError::InputOutputSame(_)));
-    }
-
-    #[test]
-    fn test_mute_with_extensionless_input() {
-        let input = Path::new("myvideo");
-        let plan = plan_mute(input, None, false).unwrap();
-        assert_eq!(plan.final_output, PathBuf::from("myvideo_muted.mp4"));
-    }
-
-    #[test]
-    fn test_mute_with_nested_directories_and_spaces() {
-        let input = Path::new("clips/vacation 2026/beach sunset.mkv");
-        let plan = plan_mute(input, None, true).unwrap();
-        assert_eq!(
-            plan.final_output,
-            PathBuf::from("clips/vacation 2026/beach sunset_muted.mkv")
-        );
-        assert!(plan.overwrite);
-    }
-
-    #[test]
-    fn test_mute_with_unicode_characters() {
-        let input = Path::new("vidéo_été_2026.mp4");
-        let plan = plan_mute(input, None, false).unwrap();
-        assert_eq!(plan.final_output, PathBuf::from("vidéo_été_2026_muted.mp4"));
-    }
-
-    #[test]
-    fn test_mute_with_multiple_dots_in_filename() {
-        let input = Path::new("backup.archive.v1.mp4");
-        let plan = plan_mute(input, None, false).unwrap();
-        assert_eq!(
-            plan.final_output,
-            PathBuf::from("backup.archive.v1_muted.mp4")
-        );
-    }
-
-    #[test]
-    fn test_mute_ffmpeg_args_structure() {
-        let input = Path::new("input.mov");
-        let plan = plan_mute(input, None, false).unwrap();
-
-        let expected_args: Vec<OsString> = vec![
-            "-hide_banner".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-i".into(),
-            "input.mov".into(),
-            "-c:v".into(),
-            "copy".into(),
-            "-an".into(),
-            "-movflags".into(),
-            "+faststart".into(),
-        ];
-        assert_eq!(plan.ffmpeg_args, expected_args);
     }
 
     #[test]

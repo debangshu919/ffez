@@ -30,6 +30,17 @@ which = "8.0.6"
 assert_cmd = "2"
 predicates = "3"
 
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = [
+    "precommit-hook",
+    "run-cargo-fmt",
+    "run-cargo-clippy",
+    "run-cargo-test",
+    "run-for-all",
+]
+
 [profile.dev]
 opt-level = 0
 incremental = true

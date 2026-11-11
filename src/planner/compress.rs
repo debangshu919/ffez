@@ -15,6 +15,46 @@ pub struct VideoSource {
     pub fps: f64,
 }
 
+/// How hard `compress` tries, at a fixed size cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressMode {
+    /// Two-pass average bitrate at `-preset medium`.
+    Balanced,
+    /// One pass at `-preset veryfast`, aimed a little further under the cap.
+    Fast,
+    /// Search for the best CRF that still fits, at `-preset slow`.
+    Quality,
+}
+
+/// The ffmpeg work for one compress plan.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlannedEncode {
+    /// Pass 1 includes the null-muxer output. The runner inserts `-passlogfile`.
+    TwoPass {
+        pass1_args: Vec<OsString>,
+        /// Without the destination path. The runner appends the temp file.
+        pass2_args: Vec<OsString>,
+    },
+    /// One encode. The runner appends the destination.
+    Single { args: Vec<OsString> },
+    /// CRF search. Args omit `-crf`; the runner inserts it and appends the destination.
+    Quality(QualitySearch),
+}
+
+/// Bounds for a `--quality` CRF search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualitySearch {
+    pub args: Vec<OsString>,
+    pub crf_min: f64,
+    pub crf_max: f64,
+    /// Stop once the remaining CRF range is no wider than this.
+    pub crf_span: f64,
+    /// A file at least this fraction of the cap is close enough.
+    pub close_enough: f64,
+    pub target_bytes: u64,
+    pub cap_label: String,
+}
+
 /// Two ffmpeg invocations that encode `input` toward a file-size cap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressPlan {
@@ -24,10 +64,7 @@ pub struct CompressPlan {
     pub video_bps: u64,
     pub audio_bps: Option<u64>,
     pub scale_height: Option<u32>,
-    /// Pass 1, including the null-muxer output. The runner inserts `-passlogfile`.
-    pub pass1_args: Vec<OsString>,
-    /// Pass 2, without the destination path. The runner appends the temp file.
-    pub pass2_args: Vec<OsString>,
+    pub encode: PlannedEncode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +75,13 @@ struct BitrateBudget {
 
 /// Share of the requested size left for audio and video. The rest covers the
 /// container and the small miss two-pass rate control still has.
-const SIZE_SAFETY: f64 = 0.95;
+const BALANCED_SAFETY: f64 = 0.95;
+/// Single-pass rate control misses the cap more often, so fast mode aims lower.
+const FAST_SAFETY: f64 = 0.90;
+const QUALITY_CRF_MIN: f64 = 18.0;
+const QUALITY_CRF_MAX: f64 = 35.0;
+const QUALITY_CRF_SPAN: f64 = 0.5;
+const QUALITY_CLOSE_ENOUGH: f64 = 0.97;
 const MIN_VIDEO_BPS: u64 = 64_000;
 const AUDIO_BITRATES_BPS: [u64; 3] = [128_000, 96_000, 64_000];
 /// Below this, the same bitrate looks better on a smaller frame.
@@ -65,32 +108,60 @@ pub fn plan_compress(
     size: ByteSize,
     source: &VideoSource,
 ) -> Result<CompressPlan, FfezError> {
+    plan_compress_mode(
+        input,
+        output,
+        overwrite,
+        size,
+        source,
+        CompressMode::Balanced,
+    )
+}
+
+pub fn plan_compress_mode(
+    input: &Path,
+    output: Option<&Path>,
+    overwrite: bool,
+    size: ByteSize,
+    source: &VideoSource,
+    mode: CompressMode,
+) -> Result<CompressPlan, FfezError> {
     let final_output = compress_output_path(input, output)?;
-    let budget =
-        allocate_bitrate(size.as_u64(), source.duration_secs, source.has_audio).map_err(|err| {
-            match err {
-                BudgetError::Empty => FfezError::EmptyTarget,
-                BudgetError::BadDuration => FfezError::UnknownDuration(input.to_path_buf()),
-                BudgetError::TooSmall => FfezError::TargetTooSmall {
-                    target: format_si(size.as_u64()),
-                    duration_secs: source.duration_secs,
-                    minimum: format_si(minimum_target_bytes(
-                        source.duration_secs,
-                        source.has_audio,
-                    )),
-                },
-            }
-        })?;
+    let safety = match mode {
+        CompressMode::Fast => FAST_SAFETY,
+        CompressMode::Balanced | CompressMode::Quality => BALANCED_SAFETY,
+    };
+    let budget = allocate_bitrate(
+        size.as_u64(),
+        source.duration_secs,
+        source.has_audio,
+        safety,
+    )
+    .map_err(|err| match err {
+        BudgetError::Empty => FfezError::EmptyTarget,
+        BudgetError::BadDuration => FfezError::UnknownDuration(input.to_path_buf()),
+        BudgetError::TooSmall => FfezError::TargetTooSmall {
+            target: format_si(size.as_u64()),
+            duration_secs: source.duration_secs,
+            minimum: format_si(minimum_target_bytes(
+                source.duration_secs,
+                source.has_audio,
+                safety,
+            )),
+        },
+    })?;
 
     let scale_height = scale_height(source.width, source.height, source.fps, budget.video_bps);
-    let (pass1_args, pass2_args) = encode_args(
+    let encode = encode_args(EncodeInput {
         input,
-        &final_output,
-        budget.video_bps,
-        budget.audio_bps,
+        output: &final_output,
+        video_bps: budget.video_bps,
+        audio_bps: budget.audio_bps,
         scale_height,
-        source.fps,
-    );
+        fps: source.fps,
+        mode,
+        target_bytes: size.as_u64(),
+    });
 
     Ok(CompressPlan {
         input: input.to_path_buf(),
@@ -99,8 +170,7 @@ pub fn plan_compress(
         video_bps: budget.video_bps,
         audio_bps: budget.audio_bps,
         scale_height,
-        pass1_args,
-        pass2_args,
+        encode,
     })
 }
 
@@ -115,6 +185,7 @@ fn allocate_bitrate(
     target_bytes: u64,
     duration_secs: f64,
     has_audio: bool,
+    safety: f64,
 ) -> Result<BitrateBudget, BudgetError> {
     if target_bytes == 0 {
         return Err(BudgetError::Empty);
@@ -123,7 +194,7 @@ fn allocate_bitrate(
         return Err(BudgetError::BadDuration);
     }
 
-    let total_bps = (target_bytes as f64) * 8.0 * SIZE_SAFETY / duration_secs;
+    let total_bps = (target_bytes as f64) * 8.0 * safety / duration_secs;
     if !total_bps.is_finite() {
         return Err(BudgetError::BadDuration);
     }
@@ -152,21 +223,21 @@ fn allocate_bitrate(
     Err(BudgetError::TooSmall)
 }
 
-fn minimum_target_bytes(duration_secs: f64, has_audio: bool) -> u64 {
+fn minimum_target_bytes(duration_secs: f64, has_audio: bool, safety: f64) -> u64 {
     let audio_bps = if has_audio {
         AUDIO_BITRATES_BPS[AUDIO_BITRATES_BPS.len() - 1]
     } else {
         0
     };
     let min_bps = MIN_VIDEO_BPS + audio_bps;
-    let raw = (min_bps as f64) * duration_secs / (8.0 * SIZE_SAFETY);
+    let raw = (min_bps as f64) * duration_secs / (8.0 * safety);
     if !raw.is_finite() || raw <= 0.0 {
         return 1;
     }
 
     let mut bytes = raw.ceil() as u64;
     for _ in 0..8 {
-        if allocate_bitrate(bytes, duration_secs, has_audio).is_ok() {
+        if allocate_bitrate(bytes, duration_secs, has_audio, safety).is_ok() {
             return bytes;
         }
         bytes = bytes.saturating_add(bytes / 1000 + 1);
@@ -212,14 +283,33 @@ fn bits_per_pixel(width: u32, height: u32, fps: f64, video_bps: u64) -> f64 {
     video_bps as f64 / (width as f64 * height as f64 * fps)
 }
 
-fn encode_args(
-    input: &Path,
-    output: &Path,
+struct EncodeInput<'a> {
+    input: &'a Path,
+    output: &'a Path,
     video_bps: u64,
     audio_bps: Option<u64>,
     scale_height: Option<u32>,
     fps: f64,
-) -> (Vec<OsString>, Vec<OsString>) {
+    mode: CompressMode,
+    target_bytes: u64,
+}
+
+fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
+    let EncodeInput {
+        input,
+        output,
+        video_bps,
+        audio_bps,
+        scale_height,
+        fps,
+        mode,
+        target_bytes,
+    } = job;
+    let preset = match mode {
+        CompressMode::Balanced => "medium",
+        CompressMode::Fast => "veryfast",
+        CompressMode::Quality => "slow",
+    };
     let mut shared = vec![
         OsString::from("-nostdin"),
         OsString::from("-hide_banner"),
@@ -233,14 +323,16 @@ fn encode_args(
         OsString::from("-c:v"),
         OsString::from("libx264"),
         OsString::from("-preset"),
-        OsString::from("medium"),
+        OsString::from(preset),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
-        OsString::from("-b:v"),
-        OsString::from(video_bps.to_string()),
     ];
+    if mode != CompressMode::Quality {
+        shared.push(OsString::from("-b:v"));
+        shared.push(OsString::from(video_bps.to_string()));
+    }
     // Variable-frame-rate phone video produces equal timestamps. The pass-1
-    // null muxer rejects those, so both passes emit a constant frame rate.
+    // null muxer rejects those, so every encode emits a constant frame rate.
     shared.push(OsString::from("-fps_mode"));
     shared.push(OsString::from("cfr"));
     if let Some(rate) = format_frame_rate(fps) {
@@ -249,25 +341,63 @@ fn encode_args(
     }
     if let Some(height) = scale_height {
         shared.push(OsString::from("-vf"));
-        shared.push(OsString::from(format!("scale=-2:{height}")));
+        shared.push(OsString::from(scale_filter(
+            height,
+            mode == CompressMode::Quality,
+        )));
     }
 
-    let mut pass1 = shared.clone();
-    pass1.extend([
-        OsString::from("-pass"),
-        OsString::from("1"),
-        OsString::from("-an"),
-        OsString::from("-f"),
-        OsString::from("null"),
-        OsString::from("-"),
-    ]);
+    match mode {
+        CompressMode::Balanced => {
+            let mut pass1 = shared.clone();
+            pass1.extend([
+                OsString::from("-pass"),
+                OsString::from("1"),
+                OsString::from("-an"),
+                OsString::from("-f"),
+                OsString::from("null"),
+                OsString::from("-"),
+            ]);
+            let mut pass2 = shared;
+            pass2.push(OsString::from("-pass"));
+            pass2.push(OsString::from("2"));
+            push_audio_and_faststart(&mut pass2, output, audio_bps);
+            PlannedEncode::TwoPass {
+                pass1_args: pass1,
+                pass2_args: pass2,
+            }
+        }
+        CompressMode::Fast => {
+            push_audio_and_faststart(&mut shared, output, audio_bps);
+            PlannedEncode::Single { args: shared }
+        }
+        CompressMode::Quality => {
+            push_audio_and_faststart(&mut shared, output, audio_bps);
+            PlannedEncode::Quality(QualitySearch {
+                args: shared,
+                crf_min: QUALITY_CRF_MIN,
+                crf_max: QUALITY_CRF_MAX,
+                crf_span: QUALITY_CRF_SPAN,
+                close_enough: QUALITY_CLOSE_ENOUGH,
+                target_bytes,
+                cap_label: format_si(target_bytes),
+            })
+        }
+    }
+}
 
-    let mut pass2 = shared;
-    pass2.push(OsString::from("-pass"));
-    pass2.push(OsString::from("2"));
+fn scale_filter(height: u32, lanczos: bool) -> String {
+    if lanczos {
+        format!("scale=-2:{height}:flags=lanczos")
+    } else {
+        format!("scale=-2:{height}")
+    }
+}
+
+fn push_audio_and_faststart(args: &mut Vec<OsString>, output: &Path, audio_bps: Option<u64>) {
     match audio_bps {
         Some(bps) => {
-            pass2.extend([
+            args.extend([
                 OsString::from("-map"),
                 OsString::from("0:a:0"),
                 OsString::from("-c:a"),
@@ -276,14 +406,12 @@ fn encode_args(
                 OsString::from(format!("{}k", bps / 1000)),
             ]);
         }
-        None => pass2.push(OsString::from("-an")),
+        None => args.push(OsString::from("-an")),
     }
     if container_uses_faststart(output) {
-        pass2.push(OsString::from("-movflags"));
-        pass2.push(OsString::from("+faststart"));
+        args.push(OsString::from("-movflags"));
+        args.push(OsString::from("+faststart"));
     }
-
-    (pass1, pass2)
 }
 
 /// A rate the encoder can use without turning a variable-frame-rate clip into
@@ -346,6 +474,16 @@ mod tests {
         }
     }
 
+    fn two_pass(plan: &CompressPlan) -> (&[OsString], &[OsString]) {
+        match &plan.encode {
+            PlannedEncode::TwoPass {
+                pass1_args,
+                pass2_args,
+            } => (pass1_args, pass2_args),
+            other => panic!("expected two-pass encode, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_default_output_is_mp4() {
         let plan = plan_compress(
@@ -360,8 +498,9 @@ mod tests {
             plan.final_output,
             PathBuf::from("clips/holiday_compressed.mp4")
         );
+        let (_, pass2) = two_pass(&plan);
         assert!(
-            plan.pass2_args
+            pass2
                 .windows(2)
                 .any(|pair| { pair[0] == "-movflags" && pair[1] == "+faststart" })
         );
@@ -379,7 +518,8 @@ mod tests {
         .unwrap();
         assert_eq!(plan.final_output, PathBuf::from("out/small.mkv"));
         assert!(plan.overwrite);
-        assert!(!plan.pass2_args.iter().any(|arg| arg == "-movflags"));
+        let (_, pass2) = two_pass(&plan);
+        assert!(!pass2.iter().any(|arg| arg == "-movflags"));
         assert_eq!(plan.audio_bps, None);
     }
 
@@ -399,22 +539,22 @@ mod tests {
 
     #[test]
     fn test_twenty_five_megabyte_budget_for_one_minute() {
-        let budget = allocate_bitrate(25_000_000, 60.0, true).unwrap();
+        let budget = allocate_bitrate(25_000_000, 60.0, true, BALANCED_SAFETY).unwrap();
         assert_eq!(budget.audio_bps, Some(128_000));
         assert_eq!(budget.video_bps, 3_038_666);
 
-        let silent = allocate_bitrate(25_000_000, 60.0, false).unwrap();
+        let silent = allocate_bitrate(25_000_000, 60.0, false, BALANCED_SAFETY).unwrap();
         assert_eq!(silent.audio_bps, None);
         assert_eq!(silent.video_bps, 3_166_666);
     }
 
     #[test]
     fn test_audio_ladder_steps_down() {
-        let mid = allocate_bitrate(236_842, 10.0, true).unwrap();
+        let mid = allocate_bitrate(236_842, 10.0, true, BALANCED_SAFETY).unwrap();
         assert_eq!(mid.audio_bps, Some(96_000));
         assert!(mid.video_bps >= MIN_VIDEO_BPS);
 
-        let low = allocate_bitrate(184_210, 10.0, true).unwrap();
+        let low = allocate_bitrate(184_210, 10.0, true, BALANCED_SAFETY).unwrap();
         assert_eq!(low.audio_bps, Some(64_000));
         assert!(low.video_bps >= MIN_VIDEO_BPS);
     }
@@ -422,19 +562,19 @@ mod tests {
     #[test]
     fn test_rejects_empty_and_impossible_targets() {
         assert_eq!(
-            allocate_bitrate(0, 10.0, true).unwrap_err(),
+            allocate_bitrate(0, 10.0, true, BALANCED_SAFETY).unwrap_err(),
             BudgetError::Empty
         );
         assert_eq!(
-            allocate_bitrate(1_000, 0.0, true).unwrap_err(),
+            allocate_bitrate(1_000, 0.0, true, BALANCED_SAFETY).unwrap_err(),
             BudgetError::BadDuration
         );
         assert_eq!(
-            allocate_bitrate(1_000, f64::NAN, false).unwrap_err(),
+            allocate_bitrate(1_000, f64::NAN, false, BALANCED_SAFETY).unwrap_err(),
             BudgetError::BadDuration
         );
         assert_eq!(
-            allocate_bitrate(1_000, 30.0, true).unwrap_err(),
+            allocate_bitrate(1_000, 30.0, true, BALANCED_SAFETY).unwrap_err(),
             BudgetError::TooSmall
         );
 
@@ -458,9 +598,9 @@ mod tests {
         assert!((duration_secs - 3600.0).abs() < f64::EPSILON);
         assert_eq!(minimum, "60.6 MB");
 
-        let minimum_bytes = minimum_target_bytes(3600.0, true);
-        assert!(allocate_bitrate(minimum_bytes, 3600.0, true).is_ok());
-        assert!(allocate_bitrate(minimum_bytes - 1, 3600.0, true).is_err());
+        let minimum_bytes = minimum_target_bytes(3600.0, true, BALANCED_SAFETY);
+        assert!(allocate_bitrate(minimum_bytes, 3600.0, true, BALANCED_SAFETY).is_ok());
+        assert!(allocate_bitrate(minimum_bytes - 1, 3600.0, true, BALANCED_SAFETY).is_err());
     }
 
     #[test]
@@ -487,35 +627,88 @@ mod tests {
         assert_eq!(plan.video_bps, 3_038_666);
         assert_eq!(plan.audio_bps, Some(128_000));
         assert_eq!(plan.scale_height, None);
+        let (pass1, pass2) = two_pass(&plan);
         assert!(
-            plan.pass1_args
+            pass1
                 .windows(2)
                 .any(|pair| pair[0] == "-pass" && pair[1] == "1")
         );
         assert!(
-            plan.pass1_args
+            pass1
                 .windows(2)
                 .any(|pair| pair[0] == "-f" && pair[1] == "null")
         );
         assert_eq!(
-            plan.pass1_args.last().map(OsString::as_os_str),
+            pass1.last().map(OsString::as_os_str),
             Some(std::ffi::OsStr::new("-"))
         );
         assert!(
-            plan.pass2_args
+            pass2
                 .windows(2)
                 .any(|pair| pair[0] == "-b:v" && pair[1] == "3038666")
         );
         assert!(
-            plan.pass2_args
+            pass2
                 .windows(2)
                 .any(|pair| pair[0] == "-b:a" && pair[1] == "128k")
         );
         assert!(
-            plan.pass2_args
+            pass2
                 .windows(2)
                 .any(|pair| pair[0] == "-pass" && pair[1] == "2")
         );
+    }
+
+    #[test]
+    fn test_fast_mode_is_one_pass_at_a_lower_target() {
+        let plan = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 320, 240, 24.0),
+            CompressMode::Fast,
+        )
+        .unwrap();
+        assert_eq!(plan.video_bps, 2_872_000);
+        let PlannedEncode::Single { args } = &plan.encode else {
+            panic!("expected a single pass");
+        };
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-preset" && pair[1] == "veryfast")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "2872000")
+        );
+        assert!(!args.iter().any(|arg| arg == "-pass"));
+    }
+
+    #[test]
+    fn test_quality_mode_searches_crf_with_lanczos() {
+        let plan = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 1920, 1080, 30.0),
+            CompressMode::Quality,
+        )
+        .unwrap();
+        assert_eq!(plan.scale_height, Some(720));
+        let PlannedEncode::Quality(search) = &plan.encode else {
+            panic!("expected a quality search");
+        };
+        assert_eq!((search.crf_min, search.crf_max), (18.0, 35.0));
+        assert_eq!(search.cap_label, "25.0 MB");
+        let args = &search.args;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-preset" && pair[1] == "slow")
+        );
+        assert!(!args.iter().any(|arg| arg == "-b:v"));
+        assert!(args.contains(&OsString::from("scale=-2:720:flags=lanczos")));
     }
 
     #[test]
@@ -529,7 +722,8 @@ mod tests {
         )
         .unwrap();
 
-        for args in [&plan.pass1_args, &plan.pass2_args] {
+        let (pass1, pass2) = two_pass(&plan);
+        for args in [pass1, pass2] {
             assert!(
                 args.windows(2)
                     .any(|pair| pair[0] == "-fps_mode" && pair[1] == "cfr")
@@ -548,14 +742,14 @@ mod tests {
             &source(60.0, true, 320, 240, 0.0),
         )
         .unwrap();
+        let (pass1, pass2) = two_pass(&unknown);
         assert!(
-            unknown
-                .pass1_args
+            pass1
                 .windows(2)
                 .any(|pair| pair[0] == "-fps_mode" && pair[1] == "cfr")
         );
-        assert!(!unknown.pass1_args.iter().any(|arg| arg == "-r"));
-        assert!(!unknown.pass2_args.iter().any(|arg| arg == "-r"));
+        assert!(!pass1.iter().any(|arg| arg == "-r"));
+        assert!(!pass2.iter().any(|arg| arg == "-r"));
     }
 
     #[test]
@@ -570,7 +764,8 @@ mod tests {
         .unwrap();
         assert_eq!(plan.scale_height, Some(720));
         let filter = OsString::from("scale=-2:720");
-        assert!(plan.pass1_args.contains(&filter));
-        assert!(plan.pass2_args.contains(&filter));
+        let (pass1, pass2) = two_pass(&plan);
+        assert!(pass1.contains(&filter));
+        assert!(pass2.contains(&filter));
     }
 }

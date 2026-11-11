@@ -394,3 +394,73 @@ fn test_e2e_compress_overwrite_protection() {
     assert!(fs::metadata(&output).unwrap().len() <= 500_000);
     assert_no_temp_files(dir.path());
 }
+
+#[test]
+fn test_e2e_compress_fast_stays_under_the_cap() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("talk_compressed.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!("Skipping test_e2e_compress_fast_stays_under_the_cap: FFmpeg is not available.");
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--fast",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("Encoding video..."))
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    let actual = fs::metadata(&output).unwrap().len();
+    assert!(actual > 0, "compressed file is empty");
+    assert!(
+        actual <= 500_000,
+        "fast compress wrote {actual} bytes, above the 500000 byte cap"
+    );
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_quality_stays_under_the_cap() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("talk_compressed.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_quality_stays_under_the_cap: FFmpeg is not available."
+        );
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--quality",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("Trying CRF"))
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    let actual = fs::metadata(&output).unwrap().len();
+    assert!(actual > 0, "compressed file is empty");
+    assert!(
+        actual <= 500_000,
+        "quality compress wrote {actual} bytes, above the 500000 byte cap"
+    );
+    assert_no_temp_files(dir.path());
+}

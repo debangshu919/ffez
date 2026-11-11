@@ -87,9 +87,15 @@ ffez compress video.mp4 --size 8MB -o small.mp4
 
 # Overwrite an existing destination
 ffez compress video.mp4 -s 25M -y
+
+# One quick pass. The size is a little less exact
+ffez compress video.mp4 --size 25M --fast
+
+# Search for the best quality that still fits
+ffez compress video.mp4 --size 25M --quality
 ```
 
-`--size` accepts values like `25M`, `15MB`, `800KB`, and `1.5GiB`.
+`--size` accepts values like `25M`, `15MB`, `800KB`, and `1.5GiB`. `--fast` and `--quality` cannot be combined. Without either flag, compress runs a two-pass encode.
 
 ### Dry Run Preview
 

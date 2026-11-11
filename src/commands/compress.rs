@@ -1,5 +1,5 @@
 use crate::error::FfezError;
-use crate::planner;
+use crate::planner::{self, CompressMode};
 use crate::probe;
 use crate::runner;
 use bytesize::ByteSize;
@@ -9,6 +9,7 @@ pub fn run(
     input: &Path,
     output: Option<&Path>,
     size: ByteSize,
+    mode: CompressMode,
     overwrite: bool,
     dry_run: bool,
 ) -> Result<(), FfezError> {
@@ -25,7 +26,7 @@ pub fn run(
     }
 
     let source = probe::probe(input)?;
-    let plan = planner::plan_compress(input, output, overwrite, size, &source)?;
+    let plan = planner::plan_compress_mode(input, output, overwrite, size, &source, mode)?;
 
     if dry_run {
         println!("{}", runner::format_compress_dry_run(&plan));
@@ -51,6 +52,7 @@ mod tests {
             Path::new("missing-clip.mp4"),
             None,
             ByteSize::mb(25),
+            CompressMode::Balanced,
             false,
             true,
         )
@@ -64,6 +66,7 @@ mod tests {
             Path::new("video.mp4"),
             Some(Path::new("video.mp4")),
             ByteSize::mb(25),
+            CompressMode::Balanced,
             true,
             true,
         )
@@ -79,13 +82,29 @@ mod tests {
         File::create(&input).unwrap();
         File::create(&output).unwrap();
 
-        let err = run(&input, Some(&output), ByteSize::mb(25), false, false).unwrap_err();
+        let err = run(
+            &input,
+            Some(&output),
+            ByteSize::mb(25),
+            CompressMode::Fast,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, FfezError::OutputExists(_)));
     }
 
     #[test]
     fn test_zero_size_fails_before_touching_the_file() {
-        let err = run(Path::new("clip.mp4"), None, ByteSize::b(0), false, true).unwrap_err();
+        let err = run(
+            Path::new("clip.mp4"),
+            None,
+            ByteSize::b(0),
+            CompressMode::Quality,
+            false,
+            true,
+        )
+        .unwrap_err();
         assert!(matches!(err, FfezError::EmptyTarget));
     }
 }

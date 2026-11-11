@@ -79,7 +79,9 @@ pub enum Commands {
                       spends the rest on a two-pass H.264 encode. A small share of --size is\n\
                       held back so container overhead still fits under the cap. When the\n\
                       bitrate would be too low for the current resolution, the picture is\n\
-                      scaled down. --dry-run probes the input, so the file has to exist."
+                      scaled down. --fast uses one quick pass. --quality searches for the\n\
+                      best picture that still fits. --dry-run probes the input, so the file\n\
+                      has to exist."
     )]
     Compress {
         /// Input video file
@@ -88,6 +90,14 @@ pub enum Commands {
         /// Target file size (for example 25M, 15MB, 800KB)
         #[arg(short, long, value_parser = parse_target_size)]
         size: ByteSize,
+
+        /// One fast pass. Quicker, with a softer picture and a less exact size
+        #[arg(long, conflicts_with = "quality")]
+        fast: bool,
+
+        /// Search for the best quality that still fits under --size
+        #[arg(long, conflicts_with = "fast")]
+        quality: bool,
 
         /// Optional output file path (defaults to <input>_compressed.mp4)
         #[arg(short, long)]
@@ -346,11 +356,15 @@ mod tests {
                 Commands::Compress {
                     input,
                     size,
+                    fast,
+                    quality,
                     output,
                     overwrite,
                 } => {
                     assert_eq!(input, PathBuf::from("clip.mp4"));
                     assert_eq!(size.as_u64(), bytes);
+                    assert!(!fast);
+                    assert!(!quality);
                     assert_eq!(output, Some(PathBuf::from("small.mp4")));
                     assert!(overwrite);
                 }
@@ -378,5 +392,42 @@ mod tests {
         assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "nope"]).is_err());
         assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "0"]).is_err());
         assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "0B"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_compress_fast_and_quality_conflict() {
+        let fast =
+            Cli::try_parse_from(["ffez", "compress", "clip.mp4", "-s", "25M", "--fast"]).unwrap();
+        match fast.command {
+            Commands::Compress { fast, quality, .. } => {
+                assert!(fast);
+                assert!(!quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
+
+        let quality =
+            Cli::try_parse_from(["ffez", "compress", "clip.mp4", "-s", "25M", "--quality"])
+                .unwrap();
+        match quality.command {
+            Commands::Compress { fast, quality, .. } => {
+                assert!(!fast);
+                assert!(quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "ffez",
+                "compress",
+                "clip.mp4",
+                "-s",
+                "25M",
+                "--fast",
+                "--quality"
+            ])
+            .is_err()
+        );
     }
 }

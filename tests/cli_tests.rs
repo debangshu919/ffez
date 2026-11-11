@@ -117,6 +117,8 @@ fn test_cli_compress_help() {
         .code(0)
         .stdout(predicate::str::contains("ffprobe"))
         .stdout(predicate::str::contains("--size"))
+        .stdout(predicate::str::contains("--fast"))
+        .stdout(predicate::str::contains("--quality"))
         .stdout(predicate::str::contains("-y, --overwrite"));
 
     let mut short_cmd = Command::cargo_bin("ffez").unwrap();

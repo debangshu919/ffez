@@ -51,6 +51,9 @@ pub enum FfezError {
         duration_secs: f64,
         minimum: String,
     },
+
+    #[error("Could not fit the video under {target} even at the lowest quality (CRF {crf:.0}).")]
+    QualityExceedsTarget { target: String, crf: f64 },
 }
 
 impl FfezError {
@@ -205,6 +208,19 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Target size 500.0 KB is too small for a 3600.0s video. Smallest useful size is about 60.6 MB."
+        );
+        assert_eq!(err.ffmpeg_stderr(), None);
+    }
+
+    #[test]
+    fn test_quality_exceeds_target_message() {
+        let err = FfezError::QualityExceedsTarget {
+            target: "8.0 MB".into(),
+            crf: 35.0,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Could not fit the video under 8.0 MB even at the lowest quality (CRF 35)."
         );
         assert_eq!(err.ffmpeg_stderr(), None);
     }

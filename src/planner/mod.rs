@@ -7,7 +7,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use audio::plan_audio;
-pub use compress::{CompressPlan, VideoSource, compress_output_path, plan_compress};
+pub use compress::{
+    CompressMode, CompressPlan, PlannedEncode, QualitySearch, VideoSource, compress_output_path,
+    plan_compress, plan_compress_mode,
+};
 pub use mute::plan_mute;
 
 #[derive(Debug, PartialEq)]

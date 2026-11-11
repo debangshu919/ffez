@@ -24,9 +24,25 @@ pub fn run(cli: Cli) -> Result<(), FfezError> {
         Commands::Compress {
             input,
             size,
+            fast,
+            quality,
             output,
             overwrite,
-        } => commands::compress::run(&input, output.as_deref(), size, overwrite, cli.dry_run),
+        } => {
+            let mode = match (fast, quality) {
+                (true, false) => planner::CompressMode::Fast,
+                (false, true) => planner::CompressMode::Quality,
+                _ => planner::CompressMode::Balanced,
+            };
+            commands::compress::run(
+                &input,
+                output.as_deref(),
+                size,
+                mode,
+                overwrite,
+                cli.dry_run,
+            )
+        }
     }
 }
 
@@ -101,6 +117,8 @@ mod tests {
             command: Commands::Compress {
                 input: PathBuf::from("ghost_video.mp4"),
                 size: bytesize::ByteSize::mb(25),
+                fast: false,
+                quality: false,
                 output: None,
                 overwrite: false,
             },

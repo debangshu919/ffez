@@ -1,31 +1,72 @@
-use crate::{error::FfezError, planner::ExecutionPlan};
-use std::process::Command;
-use tempfile::Builder;
+use crate::error::FfezError;
+use crate::planner::{CompressPlan, ExecutionPlan, PlannedEncode, QualitySearch};
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use tempfile::{Builder, NamedTempFile};
 
 pub fn check_ffmpeg() -> Result<(), FfezError> {
     which::which("ffmpeg").map_err(|_| FfezError::MissingFfmpeg)?;
     Ok(())
 }
 
+pub fn check_ffprobe() -> Result<(), FfezError> {
+    which::which("ffprobe").map_err(|_| FfezError::MissingFfprobe)?;
+    Ok(())
+}
+
 pub fn format_dry_run(plan: &ExecutionPlan) -> String {
-    let mut parts = vec!["ffmpeg".to_string(), "-y".to_string()];
-    for arg in &plan.ffmpeg_args {
-        let s = arg.to_string_lossy();
-        if s.contains(' ') {
-            parts.push(format!("\"{s}\""));
-        } else {
-            parts.push(s.into_owned());
+    format_ffmpeg_invocation(&plan.ffmpeg_args, Some(&plan.final_output))
+}
+
+pub fn format_compress_dry_run(plan: &CompressPlan) -> String {
+    match &plan.encode {
+        PlannedEncode::TwoPass {
+            pass1_args,
+            pass2_args,
+        } => {
+            let pass1 = format_ffmpeg_invocation(pass1_args, None);
+            let pass2 = format_ffmpeg_invocation(pass2_args, Some(&plan.final_output));
+            format!("{pass1}\n{pass2}")
+        }
+        PlannedEncode::Single { args } => format_ffmpeg_invocation(args, Some(&plan.final_output)),
+        PlannedEncode::Quality(search) => {
+            let label = search
+                .rate_flag
+                .trim_start_matches('-')
+                .to_ascii_uppercase();
+            let with_rate = insert_rate(&search.args, search.rate_flag, &label);
+            format!(
+                "# quality search: {label} {min:.0}..{max:.0}, {summary}, cap {cap}\n{}",
+                format_ffmpeg_invocation(&with_rate, Some(&plan.final_output)),
+                min = search.crf_min,
+                max = search.crf_max,
+                summary = search.summary,
+                cap = search.cap_label,
+            )
         }
     }
+}
 
-    let out = plan.final_output.to_string_lossy();
-    if out.contains(' ') {
-        parts.push(format!("\"{out}\""));
-    } else {
-        parts.push(out.into_owned());
+fn format_ffmpeg_invocation(args: &[OsString], output: Option<&Path>) -> String {
+    let mut parts = vec!["ffmpeg".to_string(), "-y".to_string()];
+    for arg in args {
+        parts.push(quote_arg(arg));
     }
-
+    if let Some(output) = output {
+        parts.push(quote_arg(output.as_os_str()));
+    }
     parts.join(" ")
+}
+
+fn quote_arg(arg: &OsStr) -> String {
+    let text = arg.to_string_lossy();
+    if text.contains(' ') {
+        format!("\"{text}\"")
+    } else {
+        text.into_owned()
+    }
 }
 
 pub fn execute(plan: &ExecutionPlan) -> Result<(), FfezError> {
@@ -77,6 +118,215 @@ pub fn execute(plan: &ExecutionPlan) -> Result<(), FfezError> {
     temp_file.persist(&plan.final_output).map_err(|e| e.error)?;
 
     Ok(())
+}
+
+pub fn execute_compress(plan: &CompressPlan) -> Result<(), FfezError> {
+    if !plan.input.exists() {
+        return Err(FfezError::InputNotFound(plan.input.clone()));
+    }
+
+    if plan.final_output.exists() && !plan.overwrite {
+        return Err(FfezError::OutputExists(plan.final_output.clone()));
+    }
+
+    check_ffmpeg()?;
+
+    match &plan.encode {
+        PlannedEncode::TwoPass {
+            pass1_args,
+            pass2_args,
+        } => execute_two_pass(plan, pass1_args, pass2_args),
+        PlannedEncode::Single { args } => {
+            println!("Encoding video...");
+            let temp_file = output_temp(&plan.final_output)?;
+            let mut args = args.clone();
+            args.push(temp_file.path().as_os_str().to_os_string());
+            run_ffmpeg(&args)?;
+            temp_file.persist(&plan.final_output).map_err(|e| e.error)?;
+            Ok(())
+        }
+        PlannedEncode::Quality(search) => execute_quality_search(plan, search),
+    }
+}
+
+fn execute_two_pass(
+    plan: &CompressPlan,
+    pass1_args: &[OsString],
+    pass2_args: &[OsString],
+) -> Result<(), FfezError> {
+    let log_dir = tempfile::tempdir()?;
+    let passlog = log_dir.path().join("ffezpass");
+
+    println!("Analyzing video (pass 1 of 2)...");
+    run_ffmpeg(&with_passlogfile(pass1_args, &passlog))?;
+
+    let temp_file = output_temp(&plan.final_output)?;
+    let mut pass2 = with_passlogfile(pass2_args, &passlog);
+    pass2.push(temp_file.path().as_os_str().to_os_string());
+
+    println!("Encoding video (pass 2 of 2)...");
+    run_ffmpeg(&pass2)?;
+
+    temp_file.persist(&plan.final_output).map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn execute_quality_search(plan: &CompressPlan, search: &QualitySearch) -> Result<(), FfezError> {
+    let mut lo = search.crf_min;
+    let mut hi = search.crf_max;
+    let mut best: Option<NamedTempFile> = None;
+    let mut last_crf: Option<f64> = None;
+
+    for _ in 0..8 {
+        if hi - lo <= search.crf_span {
+            break;
+        }
+        let crf = ((lo + hi) / 2.0 * 10.0).round() / 10.0;
+        if last_crf.is_some_and(|previous| (previous - crf).abs() < 0.05) {
+            break;
+        }
+        last_crf = Some(crf);
+
+        let encoded = encode_at_crf(plan, search, crf)?;
+        let len = fs::metadata(encoded.path())?.len();
+        if len <= search.target_bytes {
+            let close = len as f64 >= search.target_bytes as f64 * search.close_enough;
+            best = Some(encoded);
+            if close {
+                break;
+            }
+            hi = crf;
+        } else {
+            lo = crf;
+        }
+    }
+
+    if best.is_none() && last_crf.is_none_or(|previous| (previous - search.crf_max).abs() > 0.05) {
+        let encoded = encode_at_crf(plan, search, search.crf_max)?;
+        let len = fs::metadata(encoded.path())?.len();
+        if len <= search.target_bytes {
+            best = Some(encoded);
+        }
+    }
+
+    let Some(best) = best else {
+        return Err(FfezError::QualityExceedsTarget {
+            target: search.cap_label.clone(),
+            crf: search.crf_max,
+        });
+    };
+    best.persist(&plan.final_output).map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn encode_at_crf(
+    plan: &CompressPlan,
+    search: &QualitySearch,
+    value: f64,
+) -> Result<NamedTempFile, FfezError> {
+    let label = search
+        .rate_flag
+        .trim_start_matches('-')
+        .to_ascii_uppercase();
+    println!("Trying {label} {value:.1}...");
+    let temp_file = output_temp(&plan.final_output)?;
+    let mut args = insert_rate(&search.args, search.rate_flag, &format!("{value:.1}"));
+    args.push(temp_file.path().as_os_str().to_os_string());
+    run_ffmpeg(&args)?;
+    Ok(temp_file)
+}
+
+fn output_temp(final_output: &Path) -> Result<NamedTempFile, FfezError> {
+    let ext = final_output
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("mp4");
+    let output_dir = final_output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(Builder::new()
+        .prefix(".ffez_tmp_")
+        .suffix(&format!(".{ext}"))
+        .tempfile_in(output_dir)?)
+}
+
+fn insert_rate(args: &[OsString], flag: &str, value: &str) -> Vec<OsString> {
+    let mut rewritten = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    for arg in args {
+        if !inserted && arg == "-fps_mode" {
+            rewritten.push(OsString::from(flag));
+            rewritten.push(OsString::from(value));
+            inserted = true;
+        }
+        rewritten.push(arg.clone());
+    }
+    if !inserted {
+        rewritten.push(OsString::from(flag));
+        rewritten.push(OsString::from(value));
+    }
+    rewritten
+}
+
+pub fn ensure_nvidia_encoder() -> Result<(), FfezError> {
+    check_ffmpeg()?;
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=256x256:d=0.04:r=25",
+            "-c:v",
+            "h264_nvenc",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(FfezError::GpuUnavailable {
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn with_passlogfile(args: &[OsString], passlog: &Path) -> Vec<OsString> {
+    let mut rewritten = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    for arg in args {
+        if !inserted && arg == "-pass" {
+            rewritten.push(OsString::from("-passlogfile"));
+            rewritten.push(passlog.as_os_str().to_os_string());
+            inserted = true;
+        }
+        rewritten.push(arg.clone());
+    }
+    rewritten
+}
+
+fn run_ffmpeg(args: &[OsString]) -> Result<(), FfezError> {
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .args(args)
+        .stdin(Stdio::null())
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(FfezError::FfmpegFailed {
+            code: status.code().unwrap_or(-1),
+            stderr: String::new(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -238,5 +488,207 @@ mod tests {
         } else {
             assert!(matches!(res.unwrap_err(), FfezError::MissingFfmpeg));
         }
+    }
+
+    #[test]
+    fn test_check_ffprobe_reflects_environment() {
+        let has_ffprobe = which::which("ffprobe").is_ok();
+        let res = check_ffprobe();
+        if has_ffprobe {
+            assert!(res.is_ok());
+        } else {
+            assert!(matches!(res.unwrap_err(), FfezError::MissingFfprobe));
+        }
+    }
+
+    #[test]
+    fn test_format_compress_dry_run_prints_both_passes() {
+        use crate::planner::{VideoSource, plan_compress};
+        use bytesize::ByteSize;
+
+        let source = VideoSource {
+            duration_secs: 60.0,
+            has_audio: true,
+            width: 320,
+            height: 240,
+            fps: 24.0,
+        };
+        let plan = plan_compress(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source,
+        )
+        .unwrap();
+        let cmd = format_compress_dry_run(&plan);
+
+        assert_eq!(
+            cmd,
+            "\
+ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -fps_mode cfr -r 24 -pass 1 -an -f null -
+ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -fps_mode cfr -r 24 -pass 2 -map 0:a:0 -c:a aac -b:a 128k -movflags +faststart clip_compressed.mp4"
+        );
+    }
+
+    #[test]
+    fn test_format_compress_dry_run_quotes_paths_with_spaces() {
+        use crate::planner::{VideoSource, plan_compress};
+        use bytesize::ByteSize;
+
+        let source = VideoSource {
+            duration_secs: 60.0,
+            has_audio: false,
+            width: 320,
+            height: 240,
+            fps: 24.0,
+        };
+        let input = Path::new("raw vacation video.mp4");
+        let output = Path::new("small vacation video.mp4");
+        let plan = plan_compress(input, Some(output), false, ByteSize::mb(25), &source).unwrap();
+        let cmd = format_compress_dry_run(&plan);
+
+        assert!(cmd.contains("\"raw vacation video.mp4\""));
+        assert!(cmd.contains("\"small vacation video.mp4\""));
+        assert!(!cmd.contains("scale=-2:"));
+    }
+
+    #[test]
+    fn test_format_fast_and_quality_dry_runs() {
+        use crate::planner::{CompressMode, VideoSource, plan_compress_mode};
+        use bytesize::ByteSize;
+
+        let source = VideoSource {
+            duration_secs: 60.0,
+            has_audio: true,
+            width: 320,
+            height: 240,
+            fps: 24.0,
+        };
+        let fast = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source,
+            CompressMode::Fast,
+            crate::planner::VideoEncoder::Software,
+        )
+        .unwrap();
+        assert_eq!(
+            format_compress_dry_run(&fast),
+            "ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 2872000 -fps_mode cfr -r 24 -map 0:a:0 -c:a aac -b:a 128k -movflags +faststart clip_compressed.mp4"
+        );
+
+        let quality = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source,
+            CompressMode::Quality,
+            crate::planner::VideoEncoder::Software,
+        )
+        .unwrap();
+        let preview = format_compress_dry_run(&quality);
+        assert!(
+            preview.starts_with("# quality search: CRF 18..35, libx264 preset slow, cap 25.0 MB\n")
+        );
+        assert!(preview.contains("-preset slow"));
+        assert!(preview.contains("-crf CRF"));
+        assert!(preview.ends_with("clip_compressed.mp4"));
+        assert!(!preview.contains("-b:v"));
+    }
+
+    #[test]
+    fn test_ensure_nvidia_encoder_reports_availability() {
+        match ensure_nvidia_encoder() {
+            Ok(()) => {}
+            Err(FfezError::GpuUnavailable { .. }) => {}
+            Err(err) => panic!("unexpected nvidia probe error: {err}"),
+        }
+    }
+
+    #[test]
+    fn test_crf_is_inserted_before_the_frame_rate() {
+        let args = [
+            OsString::from("-c:v"),
+            OsString::from("libx264"),
+            OsString::from("-fps_mode"),
+            OsString::from("cfr"),
+        ];
+        assert_eq!(
+            insert_rate(&args, "-crf", "23.5"),
+            vec![
+                OsString::from("-c:v"),
+                OsString::from("libx264"),
+                OsString::from("-crf"),
+                OsString::from("23.5"),
+                OsString::from("-fps_mode"),
+                OsString::from("cfr"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execute_compress_cleans_up_after_corrupt_input() {
+        if check_ffmpeg().is_err() {
+            return;
+        }
+
+        use crate::planner::{VideoSource, plan_compress};
+        use bytesize::ByteSize;
+
+        let dir = tempdir().unwrap();
+        let corrupt_input = dir.path().join("corrupt.mp4");
+        let output = dir.path().join("corrupt_compressed.mp4");
+        fs::write(&corrupt_input, b"not a valid mp4 header").unwrap();
+
+        let source = VideoSource {
+            duration_secs: 2.0,
+            has_audio: true,
+            width: 320,
+            height: 240,
+            fps: 24.0,
+        };
+        let plan = plan_compress(
+            &corrupt_input,
+            Some(&output),
+            false,
+            ByteSize::kb(500),
+            &source,
+        )
+        .unwrap();
+        let err = execute_compress(&plan).unwrap_err();
+
+        assert!(matches!(err, FfezError::FfmpegFailed { .. }));
+        assert!(!output.exists());
+        let remaining_files: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(remaining_files, vec!["corrupt.mp4"]);
+    }
+
+    #[test]
+    fn test_with_passlogfile_inserts_before_pass() {
+        let args = vec![
+            OsString::from("-i"),
+            OsString::from("clip.mp4"),
+            OsString::from("-pass"),
+            OsString::from("1"),
+        ];
+        let rewritten = with_passlogfile(&args, Path::new("/tmp/ffezpass"));
+        assert_eq!(
+            rewritten,
+            vec![
+                OsString::from("-i"),
+                OsString::from("clip.mp4"),
+                OsString::from("-passlogfile"),
+                OsString::from("/tmp/ffezpass"),
+                OsString::from("-pass"),
+                OsString::from("1"),
+            ]
+        );
     }
 }

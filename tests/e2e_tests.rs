@@ -211,3 +211,293 @@ fn test_e2e_audio_format_inferred_from_output_extension() {
     assert!(fs::metadata(&flac_output).unwrap().len() > 0);
     assert_no_temp_files(dir.path());
 }
+
+/// A short real-time clip. Two-pass rate control needs more than one frame.
+fn create_compressible_video(output_path: &Path) -> bool {
+    if which::which("ffmpeg").is_err() {
+        return false;
+    }
+
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=320x240:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=2:frequency=440",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ])
+        .arg(output_path)
+        .status();
+
+    match status {
+        Ok(status) => status.success() && output_path.exists(),
+        Err(_) => false,
+    }
+}
+
+#[test]
+fn test_e2e_compress_lands_under_the_size_cap() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("talk_compressed.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!("Skipping test_e2e_compress_lands_under_the_size_cap: FFmpeg is not available.");
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", input.to_str().unwrap(), "--size", "500KB"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("pass 1 of 2"))
+        .stdout(predicate::str::contains("pass 2 of 2"))
+        .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    let actual = fs::metadata(&output).unwrap().len();
+    assert!(actual > 0, "compressed file is empty");
+    assert!(
+        actual <= 500_000,
+        "compressed file is {actual} bytes, above the 500000 byte cap"
+    );
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_dry_run_probes_without_writing() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("preview.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_dry_run_probes_without_writing: FFmpeg is not available."
+        );
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "25M",
+        "-o",
+        output.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("-pass 1"))
+    .stdout(predicate::str::contains("-pass 2"))
+    .stdout(predicate::str::contains("-c:v libx264"))
+    .stdout(predicate::str::contains("-b:v"));
+
+    assert!(!output.exists(), "dry run wrote an output file");
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_rejects_an_impossible_size() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+
+    if !create_synthetic_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_rejects_an_impossible_size: FFmpeg is not available."
+        );
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", input.to_str().unwrap(), "--size", "1KB"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("too small"));
+
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_overwrite_protection() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("small.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!("Skipping test_e2e_compress_overwrite_protection: FFmpeg is not available.");
+        return;
+    }
+
+    let mut created = Command::cargo_bin("ffez").unwrap();
+    created
+        .args([
+            "compress",
+            input.to_str().unwrap(),
+            "--size",
+            "500KB",
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .code(0);
+
+    let mut blocked = Command::cargo_bin("ffez").unwrap();
+    blocked
+        .args([
+            "compress",
+            input.to_str().unwrap(),
+            "--size",
+            "500KB",
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Output file already exists"));
+
+    let mut replaced = Command::cargo_bin("ffez").unwrap();
+    replaced
+        .args([
+            "compress",
+            input.to_str().unwrap(),
+            "--size",
+            "500KB",
+            "-o",
+            output.to_str().unwrap(),
+            "-y",
+        ])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    assert!(fs::metadata(&output).unwrap().len() <= 500_000);
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_fast_stays_under_the_cap() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("talk_compressed.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!("Skipping test_e2e_compress_fast_stays_under_the_cap: FFmpeg is not available.");
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--fast",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("Encoding video..."))
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    let actual = fs::metadata(&output).unwrap().len();
+    assert!(actual > 0, "compressed file is empty");
+    assert!(
+        actual <= 500_000,
+        "fast compress wrote {actual} bytes, above the 500000 byte cap"
+    );
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_quality_stays_under_the_cap() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+    let output = dir.path().join("talk_compressed.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_quality_stays_under_the_cap: FFmpeg is not available."
+        );
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--quality",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("Trying CRF"))
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    let actual = fs::metadata(&output).unwrap().len();
+    assert!(actual > 0, "compressed file is empty");
+    assert!(
+        actual <= 500_000,
+        "quality compress wrote {actual} bytes, above the 500000 byte cap"
+    );
+    assert_no_temp_files(dir.path());
+}
+
+#[test]
+fn test_e2e_compress_gpu_fast_when_nvidia_is_available() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_gpu_fast_when_nvidia_is_available: FFmpeg is not available."
+        );
+        return;
+    }
+    if ffez::runner::ensure_nvidia_encoder().is_err() {
+        eprintln!(
+            "Skipping test_e2e_compress_gpu_fast_when_nvidia_is_available: NVIDIA NVENC is not available."
+        );
+        return;
+    }
+
+    let output = dir.path().join("talk_compressed.mp4");
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--gpu",
+        "--fast",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    assert!(fs::metadata(&output).unwrap().len() <= 500_000);
+    assert_no_temp_files(dir.path());
+}

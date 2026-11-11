@@ -1,5 +1,6 @@
 use clap::Parser;
 use ffez::cli::Cli;
+use ffez::error::FfezError;
 use ffez::run;
 use std::process::ExitCode;
 
@@ -9,7 +10,11 @@ fn main() -> ExitCode {
     if let Err(err) = run(cli) {
         eprintln!("\x1b[1;31merror:\x1b[0m {err}");
         if let Some(stderr) = err.ffmpeg_stderr() {
-            eprintln!("\n--- ffmpeg details ---\n{}", stderr.trim());
+            let tool = match &err {
+                FfezError::FfprobeFailed { .. } => "ffprobe",
+                _ => "ffmpeg",
+            };
+            eprintln!("\n--- {tool} details ---\n{}", stderr.trim());
         }
         return ExitCode::FAILURE;
     }

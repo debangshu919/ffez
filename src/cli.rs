@@ -1,4 +1,4 @@
-// use bytesize::ByteSize;
+use bytesize::ByteSize;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -26,23 +26,6 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    // /// Compress a video to a target file size or platform preset
-    // Compress {
-    //     /// Input video file
-    //     input: PathBuf,
-    //
-    //     /// Target size (e.g., "15MB", "25M", "800KB")
-    //     #[arg(short, long, conflicts_with = "preset")]
-    //     size: Option<ByteSize>,
-    //
-    //     /// Social platform preset
-    //     #[arg(long = "for", value_enum, conflicts_with = "size")]
-    //     preset: Option<Platform>,
-    //
-    //     /// output file path
-    //     #[arg(short, long)]
-    //     output: Option<PathBuf>,
-    // },
     /// Mute a video
     #[command(
         about = "Mute a video",
@@ -87,6 +70,57 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         overwrite: bool,
     },
+
+    /// Compress a video to a target file size
+    #[command(
+        about = "Compress a video to a target file size",
+        long_about = "Re-encodes a video so the output file lands under the requested size.\n\n\
+                      Probes the duration with ffprobe, reserves bitrate for AAC audio, and\n\
+                      spends the rest on a two-pass H.264 encode. A small share of --size is\n\
+                      held back so container overhead still fits under the cap. When the\n\
+                      bitrate would be too low for the current resolution, the picture is\n\
+                      scaled down. --fast uses one quick pass. --quality searches for the\n\
+                      best picture that still fits. --gpu encodes with NVIDIA NVENC when the\n\
+                      driver is available. --dry-run probes the input, so the file has to exist."
+    )]
+    Compress {
+        /// Input video file
+        input: PathBuf,
+
+        /// Target file size (for example 25M, 15MB, 800KB)
+        #[arg(short, long, value_parser = parse_target_size)]
+        size: ByteSize,
+
+        /// One fast pass. Quicker, with a softer picture and a less exact size
+        #[arg(long, conflicts_with = "quality")]
+        fast: bool,
+
+        /// Search for the best quality that still fits under --size
+        #[arg(long, conflicts_with = "fast")]
+        quality: bool,
+
+        /// Encode with an NVIDIA GPU when h264_nvenc is available
+        #[arg(long)]
+        gpu: bool,
+
+        /// Optional output file path (defaults to <input>_compressed.mp4)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Overwrite output file if it already exists
+        #[arg(short = 'y', long)]
+        overwrite: bool,
+    },
+}
+
+fn parse_target_size(raw: &str) -> Result<ByteSize, String> {
+    let size = raw
+        .parse::<ByteSize>()
+        .map_err(|_| format!("invalid size '{raw}'. Expected a value like 25M, 15MB, or 800KB"))?;
+    if size.as_u64() == 0 {
+        return Err("target size must be greater than zero".to_string());
+    }
+    Ok(size)
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,5 +333,125 @@ mod tests {
     #[test]
     fn test_parse_unknown_flag_fails() {
         assert!(Cli::try_parse_from(["ffez", "mute", "video.mp4", "--unknown-flag"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_compress_size_units() {
+        let cases = [
+            ("25M", 25_000_000),
+            ("15MB", 15_000_000),
+            ("800KB", 800_000),
+            ("1.5KB", 1_500),
+        ];
+
+        for (raw, bytes) in cases {
+            let cli = Cli::try_parse_from([
+                "ffez",
+                "compress",
+                "clip.mp4",
+                "--size",
+                raw,
+                "-o",
+                "small.mp4",
+                "-y",
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Compress {
+                    input,
+                    size,
+                    fast,
+                    quality,
+                    gpu,
+                    output,
+                    overwrite,
+                } => {
+                    assert_eq!(input, PathBuf::from("clip.mp4"));
+                    assert_eq!(size.as_u64(), bytes);
+                    assert!(!fast);
+                    assert!(!quality);
+                    assert!(!gpu);
+                    assert_eq!(output, Some(PathBuf::from("small.mp4")));
+                    assert!(overwrite);
+                }
+                _ => panic!("Expected Commands::Compress"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_compress_short_size_flag() {
+        let cli = Cli::try_parse_from(["ffez", "compress", "clip.mp4", "-s", "25M"]).unwrap();
+        match cli.command {
+            Commands::Compress { size, output, .. } => {
+                assert_eq!(size.as_u64(), 25_000_000);
+                assert_eq!(output, None);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
+    }
+
+    #[test]
+    fn test_parse_compress_requires_a_positive_size() {
+        assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4"]).is_err());
+        assert!(Cli::try_parse_from(["ffez", "compress", "--size", "25M"]).is_err());
+        assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "nope"]).is_err());
+        assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "0"]).is_err());
+        assert!(Cli::try_parse_from(["ffez", "compress", "clip.mp4", "--size", "0B"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_compress_fast_and_quality_conflict() {
+        let fast =
+            Cli::try_parse_from(["ffez", "compress", "clip.mp4", "-s", "25M", "--fast"]).unwrap();
+        match fast.command {
+            Commands::Compress { fast, quality, .. } => {
+                assert!(fast);
+                assert!(!quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
+
+        let quality =
+            Cli::try_parse_from(["ffez", "compress", "clip.mp4", "-s", "25M", "--quality"])
+                .unwrap();
+        match quality.command {
+            Commands::Compress { fast, quality, .. } => {
+                assert!(!fast);
+                assert!(quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "ffez",
+                "compress",
+                "clip.mp4",
+                "-s",
+                "25M",
+                "--fast",
+                "--quality"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_compress_gpu_flag() {
+        let cli = Cli::try_parse_from([
+            "ffez", "compress", "clip.mp4", "-s", "25M", "--gpu", "--fast",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Compress {
+                gpu, fast, quality, ..
+            } => {
+                assert!(gpu);
+                assert!(fast);
+                assert!(!quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
     }
 }

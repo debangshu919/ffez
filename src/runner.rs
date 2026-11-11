@@ -32,12 +32,17 @@ pub fn format_compress_dry_run(plan: &CompressPlan) -> String {
         }
         PlannedEncode::Single { args } => format_ffmpeg_invocation(args, Some(&plan.final_output)),
         PlannedEncode::Quality(search) => {
-            let with_crf = insert_crf(&search.args, "CRF");
+            let label = search
+                .rate_flag
+                .trim_start_matches('-')
+                .to_ascii_uppercase();
+            let with_rate = insert_rate(&search.args, search.rate_flag, &label);
             format!(
-                "# quality search: CRF {min:.0}..{max:.0}, libx264 preset slow, cap {cap}\n{}",
-                format_ffmpeg_invocation(&with_crf, Some(&plan.final_output)),
+                "# quality search: {label} {min:.0}..{max:.0}, {summary}, cap {cap}\n{}",
+                format_ffmpeg_invocation(&with_rate, Some(&plan.final_output)),
                 min = search.crf_min,
                 max = search.crf_max,
+                summary = search.summary,
                 cap = search.cap_label,
             )
         }
@@ -182,7 +187,7 @@ fn execute_quality_search(plan: &CompressPlan, search: &QualitySearch) -> Result
         }
         last_crf = Some(crf);
 
-        let encoded = encode_at_crf(plan, &search.args, crf)?;
+        let encoded = encode_at_crf(plan, search, crf)?;
         let len = fs::metadata(encoded.path())?.len();
         if len <= search.target_bytes {
             let close = len as f64 >= search.target_bytes as f64 * search.close_enough;
@@ -197,7 +202,7 @@ fn execute_quality_search(plan: &CompressPlan, search: &QualitySearch) -> Result
     }
 
     if best.is_none() && last_crf.is_none_or(|previous| (previous - search.crf_max).abs() > 0.05) {
-        let encoded = encode_at_crf(plan, &search.args, search.crf_max)?;
+        let encoded = encode_at_crf(plan, search, search.crf_max)?;
         let len = fs::metadata(encoded.path())?.len();
         if len <= search.target_bytes {
             best = Some(encoded);
@@ -216,12 +221,16 @@ fn execute_quality_search(plan: &CompressPlan, search: &QualitySearch) -> Result
 
 fn encode_at_crf(
     plan: &CompressPlan,
-    args: &[OsString],
-    crf: f64,
+    search: &QualitySearch,
+    value: f64,
 ) -> Result<NamedTempFile, FfezError> {
-    println!("Trying CRF {crf:.1}...");
+    let label = search
+        .rate_flag
+        .trim_start_matches('-')
+        .to_ascii_uppercase();
+    println!("Trying {label} {value:.1}...");
     let temp_file = output_temp(&plan.final_output)?;
-    let mut args = insert_crf(args, &format!("{crf:.1}"));
+    let mut args = insert_rate(&search.args, search.rate_flag, &format!("{value:.1}"));
     args.push(temp_file.path().as_os_str().to_os_string());
     run_ffmpeg(&args)?;
     Ok(temp_file)
@@ -242,22 +251,51 @@ fn output_temp(final_output: &Path) -> Result<NamedTempFile, FfezError> {
         .tempfile_in(output_dir)?)
 }
 
-fn insert_crf(args: &[OsString], crf: &str) -> Vec<OsString> {
+fn insert_rate(args: &[OsString], flag: &str, value: &str) -> Vec<OsString> {
     let mut rewritten = Vec::with_capacity(args.len() + 2);
     let mut inserted = false;
     for arg in args {
         if !inserted && arg == "-fps_mode" {
-            rewritten.push(OsString::from("-crf"));
-            rewritten.push(OsString::from(crf));
+            rewritten.push(OsString::from(flag));
+            rewritten.push(OsString::from(value));
             inserted = true;
         }
         rewritten.push(arg.clone());
     }
     if !inserted {
-        rewritten.push(OsString::from("-crf"));
-        rewritten.push(OsString::from(crf));
+        rewritten.push(OsString::from(flag));
+        rewritten.push(OsString::from(value));
     }
     rewritten
+}
+
+pub fn ensure_nvidia_encoder() -> Result<(), FfezError> {
+    check_ffmpeg()?;
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=256x256:d=0.04:r=25",
+            "-c:v",
+            "h264_nvenc",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(FfezError::GpuUnavailable {
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 fn with_passlogfile(args: &[OsString], passlog: &Path) -> Vec<OsString> {
@@ -534,6 +572,7 @@ ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c
             ByteSize::mb(25),
             &source,
             CompressMode::Fast,
+            crate::planner::VideoEncoder::Software,
         )
         .unwrap();
         assert_eq!(
@@ -548,6 +587,7 @@ ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c
             ByteSize::mb(25),
             &source,
             CompressMode::Quality,
+            crate::planner::VideoEncoder::Software,
         )
         .unwrap();
         let preview = format_compress_dry_run(&quality);
@@ -561,6 +601,15 @@ ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c
     }
 
     #[test]
+    fn test_ensure_nvidia_encoder_reports_availability() {
+        match ensure_nvidia_encoder() {
+            Ok(()) => {}
+            Err(FfezError::GpuUnavailable { .. }) => {}
+            Err(err) => panic!("unexpected nvidia probe error: {err}"),
+        }
+    }
+
+    #[test]
     fn test_crf_is_inserted_before_the_frame_rate() {
         let args = [
             OsString::from("-c:v"),
@@ -569,7 +618,7 @@ ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c
             OsString::from("cfr"),
         ];
         assert_eq!(
-            insert_crf(&args, "23.5"),
+            insert_rate(&args, "-crf", "23.5"),
             vec![
                 OsString::from("-c:v"),
                 OsString::from("libx264"),

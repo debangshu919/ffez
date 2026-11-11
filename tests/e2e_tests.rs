@@ -464,3 +464,40 @@ fn test_e2e_compress_quality_stays_under_the_cap() {
     );
     assert_no_temp_files(dir.path());
 }
+
+#[test]
+fn test_e2e_compress_gpu_fast_when_nvidia_is_available() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("talk.mp4");
+
+    if !create_compressible_video(&input) {
+        eprintln!(
+            "Skipping test_e2e_compress_gpu_fast_when_nvidia_is_available: FFmpeg is not available."
+        );
+        return;
+    }
+    if ffez::runner::ensure_nvidia_encoder().is_err() {
+        eprintln!(
+            "Skipping test_e2e_compress_gpu_fast_when_nvidia_is_available: NVIDIA NVENC is not available."
+        );
+        return;
+    }
+
+    let output = dir.path().join("talk_compressed.mp4");
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args([
+        "compress",
+        input.to_str().unwrap(),
+        "--size",
+        "500KB",
+        "--gpu",
+        "--fast",
+    ])
+    .assert()
+    .success()
+    .code(0)
+    .stdout(predicate::str::contains("✔ Compressed video saved to:"));
+
+    assert!(fs::metadata(&output).unwrap().len() <= 500_000);
+    assert_no_temp_files(dir.path());
+}

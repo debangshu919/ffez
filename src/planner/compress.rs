@@ -15,6 +15,15 @@ pub struct VideoSource {
     pub fps: f64,
 }
 
+/// Where the video encode runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEncoder {
+    /// libx264 on the CPU.
+    Software,
+    /// NVIDIA NVENC (`h264_nvenc`).
+    Nvidia,
+}
+
 /// How hard `compress` tries, at a fixed size cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressMode {
@@ -53,6 +62,10 @@ pub struct QualitySearch {
     pub close_enough: f64,
     pub target_bytes: u64,
     pub cap_label: String,
+    /// `-crf` for libx264, `-cq` for NVENC.
+    pub rate_flag: &'static str,
+    /// Shown in `--dry-run`, for example `libx264 preset slow`.
+    pub summary: &'static str,
 }
 
 /// Two ffmpeg invocations that encode `input` toward a file-size cap.
@@ -115,6 +128,7 @@ pub fn plan_compress(
         size,
         source,
         CompressMode::Balanced,
+        VideoEncoder::Software,
     )
 }
 
@@ -125,6 +139,7 @@ pub fn plan_compress_mode(
     size: ByteSize,
     source: &VideoSource,
     mode: CompressMode,
+    encoder: VideoEncoder,
 ) -> Result<CompressPlan, FfezError> {
     let final_output = compress_output_path(input, output)?;
     let safety = match mode {
@@ -160,6 +175,7 @@ pub fn plan_compress_mode(
         scale_height,
         fps: source.fps,
         mode,
+        encoder,
         target_bytes: size.as_u64(),
     });
 
@@ -291,6 +307,7 @@ struct EncodeInput<'a> {
     scale_height: Option<u32>,
     fps: f64,
     mode: CompressMode,
+    encoder: VideoEncoder,
     target_bytes: u64,
 }
 
@@ -303,12 +320,17 @@ fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
         scale_height,
         fps,
         mode,
+        encoder,
         target_bytes,
     } = job;
-    let preset = match mode {
-        CompressMode::Balanced => "medium",
-        CompressMode::Fast => "veryfast",
-        CompressMode::Quality => "slow",
+    let nvidia = encoder == VideoEncoder::Nvidia;
+    let (codec, preset) = match (mode, nvidia) {
+        (CompressMode::Balanced, false) => ("libx264", "medium"),
+        (CompressMode::Fast, false) => ("libx264", "veryfast"),
+        (CompressMode::Quality, false) => ("libx264", "slow"),
+        (CompressMode::Balanced, true) => ("h264_nvenc", "p4"),
+        (CompressMode::Fast, true) => ("h264_nvenc", "p1"),
+        (CompressMode::Quality, true) => ("h264_nvenc", "p7"),
     };
     let mut shared = vec![
         OsString::from("-nostdin"),
@@ -316,20 +338,41 @@ fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
         OsString::from("-loglevel"),
         OsString::from("error"),
         OsString::from("-stats"),
+    ];
+    if nvidia {
+        // Decode on the GPU when the input codec allows it. Frames come back
+        // to the CPU for scale and the frame-rate filter, then NVENC encodes.
+        shared.push(OsString::from("-hwaccel"));
+        shared.push(OsString::from("cuda"));
+    }
+    shared.extend([
         OsString::from("-i"),
         input.as_os_str().to_os_string(),
         OsString::from("-map"),
         OsString::from("0:v:0"),
         OsString::from("-c:v"),
-        OsString::from("libx264"),
+        OsString::from(codec),
         OsString::from("-preset"),
         OsString::from(preset),
-        OsString::from("-pix_fmt"),
-        OsString::from("yuv420p"),
-    ];
+    ]);
+    if nvidia && mode != CompressMode::Fast {
+        shared.push(OsString::from("-tune"));
+        shared.push(OsString::from("hq"));
+    }
+    shared.push(OsString::from("-pix_fmt"));
+    shared.push(OsString::from("yuv420p"));
+    if nvidia {
+        shared.push(OsString::from("-rc"));
+        shared.push(OsString::from("vbr"));
+    }
     if mode != CompressMode::Quality {
         shared.push(OsString::from("-b:v"));
         shared.push(OsString::from(video_bps.to_string()));
+    }
+    if nvidia && mode == CompressMode::Balanced {
+        // NVENC's own second pass. It stays inside one ffmpeg process.
+        shared.push(OsString::from("-multipass"));
+        shared.push(OsString::from("fullres"));
     }
     // Variable-frame-rate phone video produces equal timestamps. The pass-1
     // null muxer rejects those, so every encode emits a constant frame rate.
@@ -347,8 +390,9 @@ fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
         )));
     }
 
+    let software_two_pass = mode == CompressMode::Balanced && !nvidia;
     match mode {
-        CompressMode::Balanced => {
+        CompressMode::Balanced if software_two_pass => {
             let mut pass1 = shared.clone();
             pass1.extend([
                 OsString::from("-pass"),
@@ -367,7 +411,7 @@ fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
                 pass2_args: pass2,
             }
         }
-        CompressMode::Fast => {
+        CompressMode::Balanced | CompressMode::Fast => {
             push_audio_and_faststart(&mut shared, output, audio_bps);
             PlannedEncode::Single { args: shared }
         }
@@ -381,6 +425,12 @@ fn encode_args(job: EncodeInput<'_>) -> PlannedEncode {
                 close_enough: QUALITY_CLOSE_ENOUGH,
                 target_bytes,
                 cap_label: format_si(target_bytes),
+                rate_flag: if nvidia { "-cq" } else { "-crf" },
+                summary: if nvidia {
+                    "h264_nvenc preset p7"
+                } else {
+                    "libx264 preset slow"
+                },
             })
         }
     }
@@ -668,6 +718,7 @@ mod tests {
             ByteSize::mb(25),
             &source(60.0, true, 320, 240, 24.0),
             CompressMode::Fast,
+            VideoEncoder::Software,
         )
         .unwrap();
         assert_eq!(plan.video_bps, 2_872_000);
@@ -694,6 +745,7 @@ mod tests {
             ByteSize::mb(25),
             &source(60.0, true, 1920, 1080, 30.0),
             CompressMode::Quality,
+            VideoEncoder::Software,
         )
         .unwrap();
         assert_eq!(plan.scale_height, Some(720));
@@ -709,6 +761,80 @@ mod tests {
         );
         assert!(!args.iter().any(|arg| arg == "-b:v"));
         assert!(args.contains(&OsString::from("scale=-2:720:flags=lanczos")));
+        assert_eq!(search.rate_flag, "-crf");
+    }
+
+    #[test]
+    fn test_nvidia_balanced_is_one_nvenc_pass() {
+        let plan = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 320, 240, 24.0),
+            CompressMode::Balanced,
+            VideoEncoder::Nvidia,
+        )
+        .unwrap();
+        let PlannedEncode::Single { args } = &plan.encode else {
+            panic!("expected one NVENC pass");
+        };
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-hwaccel" && pair[1] == "cuda")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c:v" && pair[1] == "h264_nvenc")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-preset" && pair[1] == "p4")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-rc" && pair[1] == "vbr")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "3038666")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-multipass" && pair[1] == "fullres")
+        );
+        assert!(!args.iter().any(|arg| arg == "-pass" || arg == "libx264"));
+    }
+
+    #[test]
+    fn test_nvidia_quality_uses_cq() {
+        let plan = plan_compress_mode(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 1920, 1080, 30.0),
+            CompressMode::Quality,
+            VideoEncoder::Nvidia,
+        )
+        .unwrap();
+        let PlannedEncode::Quality(search) = &plan.encode else {
+            panic!("expected a quality search");
+        };
+        assert_eq!(search.rate_flag, "-cq");
+        assert_eq!(search.summary, "h264_nvenc preset p7");
+        assert!(
+            search
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "-preset" && pair[1] == "p7")
+        );
+        assert!(!search.args.iter().any(|arg| arg == "-b:v" || arg == "-crf"));
+        assert!(
+            search
+                .args
+                .contains(&OsString::from("scale=-2:720:flags=lanczos"))
+        );
     }
 
     #[test]

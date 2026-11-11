@@ -54,14 +54,19 @@ pub enum FfezError {
 
     #[error("Could not fit the video under {target} even at the lowest quality (CRF {crf:.0}).")]
     QualityExceedsTarget { target: String, crf: f64 },
+
+    #[error(
+        "NVIDIA GPU encoding is not available. FFmpeg needs h264_nvenc and a working NVIDIA driver."
+    )]
+    GpuUnavailable { stderr: String },
 }
 
 impl FfezError {
     pub fn ffmpeg_stderr(&self) -> Option<&str> {
         let stderr = match self {
-            FfezError::FfmpegFailed { stderr, .. } | FfezError::FfprobeFailed { stderr, .. } => {
-                stderr
-            }
+            FfezError::FfmpegFailed { stderr, .. }
+            | FfezError::FfprobeFailed { stderr, .. }
+            | FfezError::GpuUnavailable { stderr } => stderr,
             _ => return None,
         };
         if stderr.trim().is_empty() {
@@ -223,5 +228,17 @@ mod tests {
             "Could not fit the video under 8.0 MB even at the lowest quality (CRF 35)."
         );
         assert_eq!(err.ffmpeg_stderr(), None);
+    }
+
+    #[test]
+    fn test_gpu_unavailable_includes_ffmpeg_stderr() {
+        let err = FfezError::GpuUnavailable {
+            stderr: "Cannot load nvcuda.dll\n".into(),
+        };
+        assert!(
+            err.to_string()
+                .contains("NVIDIA GPU encoding is not available")
+        );
+        assert_eq!(err.ffmpeg_stderr(), Some("Cannot load nvcuda.dll\n"));
     }
 }

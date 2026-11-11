@@ -1,5 +1,5 @@
 use crate::error::FfezError;
-use crate::planner::{self, CompressMode};
+use crate::planner::{self, CompressMode, VideoEncoder};
 use crate::probe;
 use crate::runner;
 use bytesize::ByteSize;
@@ -10,6 +10,7 @@ pub fn run(
     output: Option<&Path>,
     size: ByteSize,
     mode: CompressMode,
+    gpu: bool,
     overwrite: bool,
     dry_run: bool,
 ) -> Result<(), FfezError> {
@@ -24,9 +25,17 @@ pub fn run(
     if !input.exists() {
         return Err(FfezError::InputNotFound(input.to_path_buf()));
     }
+    if gpu {
+        runner::ensure_nvidia_encoder()?;
+    }
 
     let source = probe::probe(input)?;
-    let plan = planner::plan_compress_mode(input, output, overwrite, size, &source, mode)?;
+    let encoder = if gpu {
+        VideoEncoder::Nvidia
+    } else {
+        VideoEncoder::Software
+    };
+    let plan = planner::plan_compress_mode(input, output, overwrite, size, &source, mode, encoder)?;
 
     if dry_run {
         println!("{}", runner::format_compress_dry_run(&plan));
@@ -54,6 +63,7 @@ mod tests {
             ByteSize::mb(25),
             CompressMode::Balanced,
             false,
+            false,
             true,
         )
         .unwrap_err();
@@ -67,6 +77,7 @@ mod tests {
             Some(Path::new("video.mp4")),
             ByteSize::mb(25),
             CompressMode::Balanced,
+            false,
             true,
             true,
         )
@@ -89,6 +100,7 @@ mod tests {
             CompressMode::Fast,
             false,
             false,
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, FfezError::OutputExists(_)));
@@ -101,6 +113,7 @@ mod tests {
             None,
             ByteSize::b(0),
             CompressMode::Quality,
+            false,
             false,
             true,
         )

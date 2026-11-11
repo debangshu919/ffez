@@ -119,6 +119,7 @@ fn test_cli_compress_help() {
         .stdout(predicate::str::contains("--size"))
         .stdout(predicate::str::contains("--fast"))
         .stdout(predicate::str::contains("--quality"))
+        .stdout(predicate::str::contains("--gpu"))
         .stdout(predicate::str::contains("-y, --overwrite"));
 
     let mut short_cmd = Command::cargo_bin("ffez").unwrap();

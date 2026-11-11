@@ -26,6 +26,7 @@ pub fn run(cli: Cli) -> Result<(), FfezError> {
             size,
             fast,
             quality,
+            gpu,
             output,
             overwrite,
         } => {
@@ -39,6 +40,7 @@ pub fn run(cli: Cli) -> Result<(), FfezError> {
                 output.as_deref(),
                 size,
                 mode,
+                gpu,
                 overwrite,
                 cli.dry_run,
             )
@@ -119,6 +121,7 @@ mod tests {
                 size: bytesize::ByteSize::mb(25),
                 fast: false,
                 quality: false,
+                gpu: false,
                 output: None,
                 overwrite: false,
             },

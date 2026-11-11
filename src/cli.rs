@@ -80,8 +80,8 @@ pub enum Commands {
                       held back so container overhead still fits under the cap. When the\n\
                       bitrate would be too low for the current resolution, the picture is\n\
                       scaled down. --fast uses one quick pass. --quality searches for the\n\
-                      best picture that still fits. --dry-run probes the input, so the file\n\
-                      has to exist."
+                      best picture that still fits. --gpu encodes with NVIDIA NVENC when the\n\
+                      driver is available. --dry-run probes the input, so the file has to exist."
     )]
     Compress {
         /// Input video file
@@ -98,6 +98,10 @@ pub enum Commands {
         /// Search for the best quality that still fits under --size
         #[arg(long, conflicts_with = "fast")]
         quality: bool,
+
+        /// Encode with an NVIDIA GPU when h264_nvenc is available
+        #[arg(long)]
+        gpu: bool,
 
         /// Optional output file path (defaults to <input>_compressed.mp4)
         #[arg(short, long)]
@@ -358,6 +362,7 @@ mod tests {
                     size,
                     fast,
                     quality,
+                    gpu,
                     output,
                     overwrite,
                 } => {
@@ -365,6 +370,7 @@ mod tests {
                     assert_eq!(size.as_u64(), bytes);
                     assert!(!fast);
                     assert!(!quality);
+                    assert!(!gpu);
                     assert_eq!(output, Some(PathBuf::from("small.mp4")));
                     assert!(overwrite);
                 }
@@ -429,5 +435,23 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_parse_compress_gpu_flag() {
+        let cli = Cli::try_parse_from([
+            "ffez", "compress", "clip.mp4", "-s", "25M", "--gpu", "--fast",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Compress {
+                gpu, fast, quality, ..
+            } => {
+                assert!(gpu);
+                assert!(fast);
+                assert!(!quality);
+            }
+            _ => panic!("Expected Commands::Compress"),
+        }
     }
 }

@@ -93,9 +93,12 @@ ffez compress video.mp4 --size 25M --fast
 
 # Search for the best quality that still fits
 ffez compress video.mp4 --size 25M --quality
+
+# NVIDIA NVENC, when the driver is available. Combines with --fast or --quality
+ffez compress video.mp4 --size 25M --gpu
 ```
 
-`--size` accepts values like `25M`, `15MB`, `800KB`, and `1.5GiB`. `--fast` and `--quality` cannot be combined. Without either flag, compress runs a two-pass encode.
+`--size` accepts values like `25M`, `15MB`, `800KB`, and `1.5GiB`. `--fast` and `--quality` cannot be combined. Without either flag, compress runs a two-pass encode. `--gpu` keeps that choice and encodes with `h264_nvenc`.
 
 ### Dry Run Preview
 

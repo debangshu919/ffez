@@ -366,8 +366,8 @@ mod tests {
         assert_eq!(
             cmd,
             "\
-ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -pass 1 -an -f null -
-ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -pass 2 -map 0:a:0 -c:a aac -b:a 128k -movflags +faststart clip_compressed.mp4"
+ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -fps_mode cfr -r 24 -pass 1 -an -f null -
+ffmpeg -y -nostdin -hide_banner -loglevel error -stats -i clip.mp4 -map 0:v:0 -c:v libx264 -preset medium -pix_fmt yuv420p -b:v 3038666 -fps_mode cfr -r 24 -pass 2 -map 0:a:0 -c:a aac -b:a 128k -movflags +faststart clip_compressed.mp4"
         );
     }
 

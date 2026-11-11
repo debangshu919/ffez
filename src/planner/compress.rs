@@ -89,6 +89,7 @@ pub fn plan_compress(
         budget.video_bps,
         budget.audio_bps,
         scale_height,
+        source.fps,
     );
 
     Ok(CompressPlan {
@@ -217,6 +218,7 @@ fn encode_args(
     video_bps: u64,
     audio_bps: Option<u64>,
     scale_height: Option<u32>,
+    fps: f64,
 ) -> (Vec<OsString>, Vec<OsString>) {
     let mut shared = vec![
         OsString::from("-nostdin"),
@@ -237,6 +239,14 @@ fn encode_args(
         OsString::from("-b:v"),
         OsString::from(video_bps.to_string()),
     ];
+    // Variable-frame-rate phone video produces equal timestamps. The pass-1
+    // null muxer rejects those, so both passes emit a constant frame rate.
+    shared.push(OsString::from("-fps_mode"));
+    shared.push(OsString::from("cfr"));
+    if let Some(rate) = format_frame_rate(fps) {
+        shared.push(OsString::from("-r"));
+        shared.push(OsString::from(rate));
+    }
     if let Some(height) = scale_height {
         shared.push(OsString::from("-vf"));
         shared.push(OsString::from(format!("scale=-2:{height}")));
@@ -274,6 +284,31 @@ fn encode_args(
     }
 
     (pass1, pass2)
+}
+
+/// A rate the encoder can use without turning a variable-frame-rate clip into
+/// tens of thousands of frames per second. Unknown or absurd rates are omitted.
+fn format_frame_rate(fps: f64) -> Option<String> {
+    if !(fps.is_finite() && (1.0..=240.0).contains(&fps)) {
+        return None;
+    }
+
+    const KNOWN: [(f64, &str); 3] = [
+        (24_000.0 / 1001.0, "24000/1001"),
+        (30_000.0 / 1001.0, "30000/1001"),
+        (60_000.0 / 1001.0, "60000/1001"),
+    ];
+    for (value, label) in KNOWN {
+        if (fps - value).abs() < 0.01 {
+            return Some(label.to_string());
+        }
+    }
+
+    let rounded = fps.round();
+    if (fps - rounded).abs() < 0.01 {
+        return Some(format!("{}", rounded as u32));
+    }
+    Some(format!("{fps:.3}"))
 }
 
 fn container_uses_faststart(path: &Path) -> bool {
@@ -481,6 +516,46 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "-pass" && pair[1] == "2")
         );
+    }
+
+    #[test]
+    fn test_both_passes_use_a_constant_frame_rate() {
+        let plan = plan_compress(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 1920, 1080, 30_000.0 / 1001.0),
+        )
+        .unwrap();
+
+        for args in [&plan.pass1_args, &plan.pass2_args] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-fps_mode" && pair[1] == "cfr")
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-r" && pair[1] == "30000/1001")
+            );
+        }
+
+        let unknown = plan_compress(
+            Path::new("clip.mp4"),
+            None,
+            false,
+            ByteSize::mb(25),
+            &source(60.0, true, 320, 240, 0.0),
+        )
+        .unwrap();
+        assert!(
+            unknown
+                .pass1_args
+                .windows(2)
+                .any(|pair| pair[0] == "-fps_mode" && pair[1] == "cfr")
+        );
+        assert!(!unknown.pass1_args.iter().any(|arg| arg == "-r"));
+        assert!(!unknown.pass2_args.iter().any(|arg| arg == "-r"));
     }
 
     #[test]

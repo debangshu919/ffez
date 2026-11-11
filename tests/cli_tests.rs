@@ -13,7 +13,8 @@ fn test_cli_help_flag() {
         .stdout(predicate::str::contains("ffez"))
         .stdout(predicate::str::contains("Commands:"))
         .stdout(predicate::str::contains("mute"))
-        .stdout(predicate::str::contains("audio"));
+        .stdout(predicate::str::contains("audio"))
+        .stdout(predicate::str::contains("compress"));
 
     // Short flag -h
     let mut short_cmd = Command::cargo_bin("ffez").unwrap();
@@ -108,6 +109,28 @@ fn test_cli_mute_missing_input_fails_with_code_2() {
 }
 
 #[test]
+fn test_cli_compress_help() {
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", "--help"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("ffprobe"))
+        .stdout(predicate::str::contains("--size"))
+        .stdout(predicate::str::contains("-y, --overwrite"));
+
+    let mut short_cmd = Command::cargo_bin("ffez").unwrap();
+    short_cmd
+        .args(["compress", "-h"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "Compress a video to a target file size",
+        ));
+}
+
+#[test]
 fn test_cli_audio_missing_input_fails_with_code_2() {
     let mut cmd = Command::cargo_bin("ffez").unwrap();
     cmd.arg("audio")
@@ -115,6 +138,51 @@ fn test_cli_audio_missing_input_fails_with_code_2() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("<INPUT>"));
+}
+
+#[test]
+fn test_cli_compress_missing_size_fails_with_code_2() {
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", "video.mp4"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--size"));
+}
+
+#[test]
+fn test_cli_compress_invalid_size_fails_with_code_2() {
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", "video.mp4", "--size", "nope"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("invalid size 'nope'"))
+        .stderr(predicate::str::contains("25M"));
+}
+
+#[test]
+fn test_cli_compress_zero_size_fails_with_code_2() {
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", "video.mp4", "--size", "0"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "target size must be greater than zero",
+        ));
+}
+
+#[test]
+fn test_cli_compress_missing_input_file_exits_with_code_1() {
+    let mut cmd = Command::cargo_bin("ffez").unwrap();
+    cmd.args(["compress", "non_existent_file_xyz_123.mp4", "--size", "25M"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "Input file not found: 'non_existent_file_xyz_123.mp4'",
+        ));
 }
 
 #[test]

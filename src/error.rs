@@ -25,13 +25,46 @@ pub enum FfezError {
 
     #[error("Output path cannot be the same as input path: '{0}'")]
     InputOutputSame(PathBuf),
+
+    #[error(
+        "ffprobe not found in PATH. It ships with FFmpeg. Install it via `winget install Gyan.FFmpeg`, `brew install ffmpeg`, or your package manager."
+    )]
+    MissingFfprobe,
+
+    #[error("ffprobe failed (exit code {code})")]
+    FfprobeFailed { code: i32, stderr: String },
+
+    #[error("No video stream found in '{0}'.")]
+    NoVideoStream(PathBuf),
+
+    #[error("Could not read a duration from '{0}'.")]
+    UnknownDuration(PathBuf),
+
+    #[error("Target size must be greater than zero.")]
+    EmptyTarget,
+
+    #[error(
+        "Target size {target} is too small for a {duration_secs:.1}s video. Smallest useful size is about {minimum}."
+    )]
+    TargetTooSmall {
+        target: String,
+        duration_secs: f64,
+        minimum: String,
+    },
 }
 
 impl FfezError {
     pub fn ffmpeg_stderr(&self) -> Option<&str> {
-        match self {
-            FfezError::FfmpegFailed { stderr, .. } if !stderr.trim().is_empty() => Some(stderr),
-            _ => None,
+        let stderr = match self {
+            FfezError::FfmpegFailed { stderr, .. } | FfezError::FfprobeFailed { stderr, .. } => {
+                stderr
+            }
+            _ => return None,
+        };
+        if stderr.trim().is_empty() {
+            None
+        } else {
+            Some(stderr)
         }
     }
 }
@@ -118,6 +151,60 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Output path cannot be the same as input path: 'same.mp4'"
+        );
+        assert_eq!(err.ffmpeg_stderr(), None);
+    }
+
+    #[test]
+    fn test_ffprobe_errors_expose_stderr_and_messages() {
+        let missing = FfezError::MissingFfprobe;
+        assert!(missing.to_string().contains("ffprobe not found in PATH"));
+        assert_eq!(missing.ffmpeg_stderr(), None);
+
+        let failed = FfezError::FfprobeFailed {
+            code: 1,
+            stderr: "Invalid data found when processing input\n".into(),
+        };
+        assert_eq!(failed.to_string(), "ffprobe failed (exit code 1)");
+        assert_eq!(
+            failed.ffmpeg_stderr(),
+            Some("Invalid data found when processing input\n")
+        );
+
+        let empty = FfezError::FfprobeFailed {
+            code: 1,
+            stderr: " \n".into(),
+        };
+        assert_eq!(empty.ffmpeg_stderr(), None);
+    }
+
+    #[test]
+    fn test_compress_input_errors() {
+        let path = PathBuf::from("clip.mp4");
+        assert_eq!(
+            FfezError::NoVideoStream(path.clone()).to_string(),
+            "No video stream found in 'clip.mp4'."
+        );
+        assert_eq!(
+            FfezError::UnknownDuration(path).to_string(),
+            "Could not read a duration from 'clip.mp4'."
+        );
+        assert_eq!(
+            FfezError::EmptyTarget.to_string(),
+            "Target size must be greater than zero."
+        );
+    }
+
+    #[test]
+    fn test_target_too_small_message() {
+        let err = FfezError::TargetTooSmall {
+            target: "500.0 KB".into(),
+            duration_secs: 3600.0,
+            minimum: "60.6 MB".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Target size 500.0 KB is too small for a 3600.0s video. Smallest useful size is about 60.6 MB."
         );
         assert_eq!(err.ffmpeg_stderr(), None);
     }

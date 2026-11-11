@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod error;
 pub mod planner;
+pub mod probe;
 pub mod runner;
 
 use cli::{Cli, Commands};
@@ -20,6 +21,12 @@ pub fn run(cli: Cli) -> Result<(), FfezError> {
             output,
             overwrite,
         } => commands::audio::run(&input, output.as_deref(), format, overwrite, cli.dry_run),
+        Commands::Compress {
+            input,
+            size,
+            output,
+            overwrite,
+        } => commands::compress::run(&input, output.as_deref(), size, overwrite, cli.dry_run),
     }
 }
 
@@ -86,5 +93,21 @@ mod tests {
 
         let err = run(cli).unwrap_err();
         assert!(matches!(err, FfezError::InputOutputSame(_)));
+    }
+
+    #[test]
+    fn test_run_compress_missing_input() {
+        let cli = Cli {
+            command: Commands::Compress {
+                input: PathBuf::from("ghost_video.mp4"),
+                size: bytesize::ByteSize::mb(25),
+                output: None,
+                overwrite: false,
+            },
+            dry_run: true,
+        };
+
+        let err = run(cli).unwrap_err();
+        assert!(matches!(err, FfezError::InputNotFound(_)));
     }
 }

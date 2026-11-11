@@ -28,7 +28,7 @@
 ## Prerequisites
 
 - Rust and Cargo for installation via Cargo.
-- [FFmpeg](https://ffmpeg.org/download.html) must be installed and available in your system `PATH`.
+- [FFmpeg](https://ffmpeg.org/download.html) must be installed and available in your system `PATH` (`ffmpeg` and `ffprobe`).
 
 ---
 
@@ -74,6 +74,23 @@ ffez audio video.mp4 -f wav
 ffez audio video.mp4 -o soundtrack.flac
 ```
 
+### Compress a Video
+
+Re-encodes a video so the whole file lands under a size cap. ffez probes the duration with ffprobe, reserves bitrate for AAC audio, and runs a two-pass H.264 encode. A small share of the target is held back so container overhead still fits. If the bitrate would be too low for the current resolution, the picture is scaled down.
+
+```bash
+# Saves output to <input>_compressed.mp4
+ffez compress video.mp4 --size 25M
+
+# Custom output path
+ffez compress video.mp4 --size 8MB -o small.mp4
+
+# Overwrite an existing destination
+ffez compress video.mp4 -s 25M -y
+```
+
+`--size` accepts values like `25M`, `15MB`, `800KB`, and `1.5GiB`.
+
 ### Dry Run Preview
 
 Inspect the exact FFmpeg command that would be executed without running it:
@@ -81,7 +98,10 @@ Inspect the exact FFmpeg command that would be executed without running it:
 ```bash
 ffez mute video.mp4 --dry-run
 ffez audio video.mp4 -o track.wav --dry-run
+ffez compress video.mp4 --size 25M --dry-run
 ```
+
+`compress` probes the input during a dry run, so the file has to exist. `mute` and `audio` only print flags.
 
 ---
 
@@ -91,6 +111,7 @@ ffez audio video.mp4 -o track.wav --dry-run
 | :--- | :--- | :--- |
 | `ffez mute <INPUT>` | Strips audio from video (lossless copy) | `<input>_muted.<ext>` |
 | `ffez audio <INPUT>` | Extracts audio track (`mp3`, `wav`, `m4a`, `flac`) | `<input>.<format>` |
+| `ffez compress <INPUT> --size <SIZE>` | Re-encodes video under a target size | `<input>_compressed.mp4` |
 
 ### Common Flags
 
